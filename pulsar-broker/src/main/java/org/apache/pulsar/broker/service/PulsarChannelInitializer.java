@@ -28,8 +28,15 @@ import io.netty.handler.codec.LengthFieldBasedFrameDecoder;
 import io.netty.handler.flow.FlowControlHandler;
 import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslHandler;
+import java.io.InputStream;
+import java.io.FileInputStream;
 import java.net.SocketAddress;
+import java.nio.file.Files;
+import java.nio.file.Paths;
+import java.security.KeyStore;
+import java.security.SecureRandom;
 import java.util.concurrent.TimeUnit;
+import javax.net.ssl.*;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.pulsar.broker.PulsarService;
 import org.apache.pulsar.broker.ServiceConfiguration;
@@ -39,15 +46,24 @@ import org.apache.pulsar.common.protocol.OptionalProxyProtocolDecoder;
 import org.apache.pulsar.common.util.NettyServerSslContextBuilder;
 import org.apache.pulsar.common.util.SslContextAutoRefreshBuilder;
 import org.apache.pulsar.common.util.keystoretls.NettySSLContextAutoRefreshBuilder;
+import org.apache.pulsar.common.util.keystoretls.TogglingKeyManager;
 
 @Slf4j
 public class PulsarChannelInitializer extends ChannelInitializer<SocketChannel> {
 
     public static final String TLS_HANDLER = "tls";
+    public static final String DEFAULT_KEYSTORE_TYPE = "JKS";
+    public static final String DEFAULT_SSL_PROTOCOL = "TLS";
+    public static final String DEFAULT_SSL_ENABLED_PROTOCOLS = "TLSv1.2,TLSv1.1,TLSv1";
+    public static final String DEFAULT_SSL_KEYMANGER_ALGORITHM = KeyManagerFactory.getDefaultAlgorithm();
+    public static final String DEFAULT_SSL_TRUSTMANAGER_ALGORITHM = TrustManagerFactory.getDefaultAlgorithm();
 
     private final PulsarService pulsar;
     private final boolean enableTls;
     private final boolean tlsEnabledWithKeyStore;
+    private boolean hasOverrideWithTogglingJks = false;
+    private SSLContext overrideWithTogglingJksSslContext = null;
+    private String tmfAlgorithm = DEFAULT_SSL_TRUSTMANAGER_ALGORITHM;
     private SslContextAutoRefreshBuilder<SslContext> sslCtxRefresher;
     private final ServiceConfiguration brokerConf;
     private NettySSLContextAutoRefreshBuilder nettySSLContextAutoRefreshBuilder;
@@ -72,37 +88,79 @@ public class PulsarChannelInitializer extends ChannelInitializer<SocketChannel> 
         this.enableTls = enableTLS;
         ServiceConfiguration serviceConfig = pulsar.getConfiguration();
         this.tlsEnabledWithKeyStore = serviceConfig.isTlsEnabledWithKeyStore();
-        if (this.enableTls) {
-            if (tlsEnabledWithKeyStore) {
-                nettySSLContextAutoRefreshBuilder = new NettySSLContextAutoRefreshBuilder(
-                        serviceConfig.getTlsProvider(),
-                        serviceConfig.getTlsKeyStoreType(),
-                        serviceConfig.getTlsKeyStore(),
-                        serviceConfig.getTlsKeyStorePassword(),
-                        serviceConfig.isTlsAllowInsecureConnection(),
-                        serviceConfig.getTlsTrustStoreType(),
-                        serviceConfig.getTlsTrustStore(),
-                        serviceConfig.getTlsTrustStorePassword(),
-                        serviceConfig.isTlsRequireTrustedClientCertOnConnect(),
-                        serviceConfig.getTlsCiphers(),
-                        serviceConfig.getTlsProtocols(),
-                        serviceConfig.getTlsCertRefreshCheckDurationSec());
-            } else {
-                sslCtxRefresher = new NettyServerSslContextBuilder(serviceConfig.isTlsAllowInsecureConnection(),
-                        serviceConfig.getTlsTrustCertsFilePath(), serviceConfig.getTlsCertificateFilePath(),
-                        serviceConfig.getTlsKeyFilePath(),
-                        serviceConfig.getTlsCiphers(), serviceConfig.getTlsProtocols(),
-                        serviceConfig.isTlsRequireTrustedClientCertOnConnect(),
-                        serviceConfig.getTlsCertRefreshCheckDurationSec());
+        
+        String overrideWithTogglingJks = System.getProperty("togglingJksPath");
+        if(null != overrideWithTogglingJks) {
+            hasOverrideWithTogglingJks = true;
+            KeyStore store = KeyStore.getInstance("JKS");
+            try (InputStream is = Files.newInputStream(Paths.get(overrideWithTogglingJks))) {
+                store.load(is, null);
             }
+            
+            KeyManagerFactory factory = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
+            factory.init(store, "password".toCharArray());
+
+            // Javadoc of SSLContext.init() states the first KeyManager implementing X509ExtendedKeyManager in the array is
+            // used. We duplicate this behaviour when picking the KeyManager to wrap around.
+            X509ExtendedKeyManager x509KeyManager = null;
+            for (KeyManager keyManager : factory.getKeyManagers()) {
+                if (keyManager instanceof X509ExtendedKeyManager) {
+                    x509KeyManager = (X509ExtendedKeyManager) keyManager;
+                }
+            }
+
+            if (x509KeyManager == null)
+                throw new Exception("KeyManagerFactory did not create an X509ExtendedKeyManager");
+
+            TogglingKeyManager togglingKeyManager = new TogglingKeyManager(x509KeyManager);
+
+            // trust store
+            TrustManagerFactory trustManagerFactory;
+            trustManagerFactory = TrustManagerFactory.getInstance(tmfAlgorithm);
+            KeyStore trustStore = KeyStore.getInstance(serviceConfig.getTlsTrustStoreType());
+            char[] passwordChars = serviceConfig.getTlsTrustStorePassword().toCharArray();
+            trustStore.load(new FileInputStream(serviceConfig.getTlsTrustStore()), passwordChars);
+            trustManagerFactory.init(trustStore);
+
+            overrideWithTogglingJksSslContext = SSLContext.getInstance("TLS");
+            overrideWithTogglingJksSslContext.init(new KeyManager[] {
+                togglingKeyManager
+            },
+            trustManagerFactory.getTrustManagers(),
+            new SecureRandom());
         } else {
-            this.sslCtxRefresher = null;
+            if (this.enableTls) {
+                if (tlsEnabledWithKeyStore) {
+                    nettySSLContextAutoRefreshBuilder = new NettySSLContextAutoRefreshBuilder(
+                            serviceConfig.getTlsProvider(),
+                            serviceConfig.getTlsKeyStoreType(),
+                            serviceConfig.getTlsKeyStore(),
+                            serviceConfig.getTlsKeyStorePassword(),
+                            serviceConfig.isTlsAllowInsecureConnection(),
+                            serviceConfig.getTlsTrustStoreType(),
+                            serviceConfig.getTlsTrustStore(),
+                            serviceConfig.getTlsTrustStorePassword(),
+                            serviceConfig.isTlsRequireTrustedClientCertOnConnect(),
+                            serviceConfig.getTlsCiphers(),
+                            serviceConfig.getTlsProtocols(),
+                            serviceConfig.getTlsCertRefreshCheckDurationSec());
+                } else {
+                    sslCtxRefresher = new NettyServerSslContextBuilder(serviceConfig.isTlsAllowInsecureConnection(),
+                            serviceConfig.getTlsTrustCertsFilePath(), serviceConfig.getTlsCertificateFilePath(),
+                            serviceConfig.getTlsKeyFilePath(),
+                            serviceConfig.getTlsCiphers(), serviceConfig.getTlsProtocols(),
+                            serviceConfig.isTlsRequireTrustedClientCertOnConnect(),
+                            serviceConfig.getTlsCertRefreshCheckDurationSec());
+                }
+            } else {
+                this.sslCtxRefresher = null;
+            }
+
+            pulsar.getExecutor().scheduleAtFixedRate(safeRun(this::refreshAuthenticationCredentials),
+                    pulsar.getConfig().getAuthenticationRefreshCheckSeconds(),
+                    pulsar.getConfig().getAuthenticationRefreshCheckSeconds(), TimeUnit.SECONDS);
         }
         this.brokerConf = pulsar.getConfiguration();
-
-        pulsar.getExecutor().scheduleAtFixedRate(safeRun(this::refreshAuthenticationCredentials),
-                pulsar.getConfig().getAuthenticationRefreshCheckSeconds(),
-                pulsar.getConfig().getAuthenticationRefreshCheckSeconds(), TimeUnit.SECONDS);
     }
 
     @Override
