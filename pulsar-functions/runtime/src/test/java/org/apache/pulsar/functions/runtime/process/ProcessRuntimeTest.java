@@ -37,9 +37,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
-import io.kubernetes.client.apis.AppsV1Api;
-import io.kubernetes.client.apis.CoreV1Api;
-import io.kubernetes.client.models.V1PodSpec;
+import io.kubernetes.client.openapi.apis.AppsV1Api;
+import io.kubernetes.client.openapi.apis.CoreV1Api;
+import io.kubernetes.client.openapi.models.V1PodSpec;
 import org.apache.pulsar.common.util.ObjectMapperFactory;
 import org.apache.pulsar.functions.instance.InstanceConfig;
 import org.apache.pulsar.functions.proto.Function;
@@ -49,7 +49,9 @@ import org.apache.pulsar.functions.runtime.thread.ThreadRuntime;
 import org.apache.pulsar.functions.secretsprovider.ClearTextSecretsProvider;
 import org.apache.pulsar.functions.secretsproviderconfigurator.SecretsProviderConfigurator;
 import org.apache.pulsar.functions.utils.FunctionCommon;
+import org.apache.pulsar.functions.worker.ConnectorsManager;
 import org.apache.pulsar.functions.worker.WorkerConfig;
+import org.mockito.Mockito;
 import org.testng.annotations.AfterMethod;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
@@ -58,6 +60,8 @@ import org.testng.annotations.Test;
  * Unit test of {@link ThreadRuntime}.
  */
 public class ProcessRuntimeTest {
+    private String narExtractionDirectory = "/tmp/foo";
+    private String defaultWebServiceUrl = "http://localhost:8080";
 
     class TestSecretsProviderConfigurator implements SecretsProviderConfigurator {
 
@@ -96,7 +100,7 @@ public class ProcessRuntimeTest {
         }
 
         @Override
-        public void doAdmissionChecks(AppsV1Api appsV1Api, CoreV1Api coreV1Api, String jobNamespace, FunctionDetails functionDetails) {
+        public void doAdmissionChecks(AppsV1Api appsV1Api, CoreV1Api coreV1Api, String jobNamespace, String jobName, FunctionDetails functionDetails) {
 
         }
     }
@@ -134,7 +138,7 @@ public class ProcessRuntimeTest {
         System.setProperty(FUNCTIONS_INSTANCE_CLASSPATH, "/pulsar/lib/*");
     }
 
-    @AfterMethod
+    @AfterMethod(alwaysRun = true)
     public void tearDown() {
         if (null != this.factory) {
             this.factory.close();
@@ -142,12 +146,22 @@ public class ProcessRuntimeTest {
     }
 
     private ProcessRuntimeFactory createProcessRuntimeFactory(String extraDependenciesDir) {
+        return createProcessRuntimeFactory(extraDependenciesDir, null, false);
+    }
+
+    private ProcessRuntimeFactory createProcessRuntimeFactory(String extraDependenciesDir, String webServiceUrl,
+                                                              boolean exposePulsarAdminClientEnabled) {
         ProcessRuntimeFactory processRuntimeFactory = new ProcessRuntimeFactory();
 
         WorkerConfig workerConfig = new WorkerConfig();
         workerConfig.setPulsarServiceUrl(pulsarServiceUrl);
         workerConfig.setStateStorageServiceUrl(stateStorageServiceUrl);
         workerConfig.setAuthenticationEnabled(false);
+        workerConfig.setNarExtractionDirectory(narExtractionDirectory);
+        if (webServiceUrl != null) {
+            workerConfig.setPulsarWebServiceUrl(webServiceUrl);
+        }
+        workerConfig.setExposeAdminClientEnabled(exposePulsarAdminClientEnabled);
 
         ProcessRuntimeFactoryConfig processRuntimeFactoryConfig = new ProcessRuntimeFactoryConfig();
         processRuntimeFactoryConfig.setJavaInstanceJarLocation(javaInstanceJarFile);
@@ -158,7 +172,7 @@ public class ProcessRuntimeTest {
         workerConfig.setFunctionRuntimeFactoryClassName(ProcessRuntimeFactory.class.getName());
         workerConfig.setFunctionRuntimeFactoryConfigs(
                 ObjectMapperFactory.getThreadLocal().convertValue(processRuntimeFactoryConfig, Map.class));
-        processRuntimeFactory.initialize(workerConfig, null, new TestSecretsProviderConfigurator(), Optional.empty(), Optional.empty());
+        processRuntimeFactory.initialize(workerConfig, null, new TestSecretsProviderConfigurator(), Mockito.mock(ConnectorsManager.class), Optional.empty(), Optional.empty());
 
         return processRuntimeFactory;
     }
@@ -193,8 +207,15 @@ public class ProcessRuntimeTest {
         config.setFunctionVersion("1.0");
         config.setInstanceId(0);
         config.setMaxBufferedTuples(1024);
+        config.setMaxPendingAsyncRequests(200);
         config.setClusterName("standalone");
 
+        return config;
+    }
+
+    InstanceConfig createJavaInstanceConfig(FunctionDetails.Runtime runtime, boolean exposePulsarAdminClientEnabled) {
+        InstanceConfig config = createJavaInstanceConfig(runtime);
+        config.setExposePulsarAdminClientEnabled(exposePulsarAdminClientEnabled);
         return config;
     }
 
@@ -262,10 +283,14 @@ public class ProcessRuntimeTest {
     }
 
     private void verifyJavaInstance(InstanceConfig config) throws Exception {
-        verifyJavaInstance(config, null);
+        verifyJavaInstance(config, null, null);
     }
 
     private void verifyJavaInstance(InstanceConfig config, Path depsDir) throws Exception {
+        verifyJavaInstance(config, depsDir, null);
+    }
+
+    private void verifyJavaInstance(InstanceConfig config, Path depsDir, String webServiceUrl) throws Exception {
         ProcessRuntime container = factory.createContainer(config, userJarFile, null, 30l);
         List<String> args = container.getProcessArgs();
 
@@ -273,18 +298,29 @@ public class ProcessRuntimeTest {
         String extraDepsEnv;
         int portArg;
         int metricsPortArg;
+        int totalArgCount = 41;
+        if (webServiceUrl != null && config.isExposePulsarAdminClientEnabled()) {
+            totalArgCount += 2;
+        }
         if (null != depsDir) {
-            assertEquals(args.size(), 37);
+            assertEquals(args.size(), totalArgCount);
             extraDepsEnv = " -Dpulsar.functions.extra.dependencies.dir=" + depsDir.toString();
             classpath = classpath + ":" + depsDir + "/*";
             portArg = 24;
             metricsPortArg = 26;
         } else {
-            assertEquals(args.size(), 36);
+            assertEquals(args.size(), totalArgCount-1);
             extraDepsEnv = "";
             portArg = 23;
             metricsPortArg = 25;
         }
+        if (webServiceUrl != null && config.isExposePulsarAdminClientEnabled()) {
+            portArg += 2;
+            metricsPortArg += 2;
+        }
+
+        String pulsarAdminArg = webServiceUrl != null && config.isExposePulsarAdminClientEnabled() ?
+                " --web_serviceurl " + webServiceUrl : "";
 
         String expectedArgs = "java -cp " + classpath
                 + extraDepsEnv
@@ -298,12 +334,14 @@ public class ProcessRuntimeTest {
                 + " --function_version " + config.getFunctionVersion()
                 + " --function_details '" + JsonFormat.printer().omittingInsignificantWhitespace().print(config.getFunctionDetails())
                 + "' --pulsar_serviceurl " + pulsarServiceUrl
+                + pulsarAdminArg
                 + " --max_buffered_tuples 1024 --port " + args.get(portArg) + " --metrics_port " + args.get(metricsPortArg)
+                + " --pending_async_requests 200"
                 + " --state_storage_serviceurl " + stateStorageServiceUrl
                 + " --expected_healthcheck_interval 30"
                 + " --secrets_provider org.apache.pulsar.functions.secretsprovider.ClearTextSecretsProvider"
                 + " --secrets_provider_config '{\"Config\":\"Value\"}'"
-                + " --cluster_name standalone";
+                + " --cluster_name standalone --nar_extraction_directory " + narExtractionDirectory;
         assertEquals(String.join(" ", args), expectedArgs);
     }
 
@@ -354,6 +392,42 @@ public class ProcessRuntimeTest {
                 + " --secrets_provider_config '{\"Config\":\"Value\"}'"
                 + " --cluster_name standalone";
         assertEquals(String.join(" ", args), expectedArgs);
+    }
+
+    @Test
+    public void testJavaConstructorWithWebServiceUrlAndExposePulsarAdminClientEnabled() throws Exception {
+        InstanceConfig config = createJavaInstanceConfig(FunctionDetails.Runtime.JAVA, true);
+
+        factory = createProcessRuntimeFactory(null, defaultWebServiceUrl, true);
+
+        verifyJavaInstance(config, null, defaultWebServiceUrl);
+    }
+
+    @Test
+    public void testJavaConstructorWithWebServiceUrlAndExposePulsarAdminClientDisabled() throws Exception {
+        InstanceConfig config = createJavaInstanceConfig(FunctionDetails.Runtime.JAVA, false);
+
+        factory = createProcessRuntimeFactory(null, defaultWebServiceUrl, false);
+
+        verifyJavaInstance(config, null, defaultWebServiceUrl);
+    }
+
+    @Test
+    public void testJavaConstructorWithoutWebServiceUrlAndExposePulsarAdminClientEnabled() throws Exception {
+        InstanceConfig config = createJavaInstanceConfig(FunctionDetails.Runtime.JAVA, true);
+
+        factory = createProcessRuntimeFactory(null, null, true);
+
+        verifyJavaInstance(config, null, null);
+    }
+
+    @Test
+    public void testJavaConstructorWithoutWebServiceUrlAndExposePulsarAdminClientDisabled() throws Exception {
+        InstanceConfig config = createJavaInstanceConfig(FunctionDetails.Runtime.JAVA, false);
+
+        factory = createProcessRuntimeFactory(null, null, false);
+
+        verifyJavaInstance(config, null, null);
     }
 
 }

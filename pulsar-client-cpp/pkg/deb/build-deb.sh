@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements.  See the NOTICE file
@@ -21,24 +21,24 @@
 set -e -x
 
 cd /pulsar
-SRC_ROOT_DIR=$(git rev-parse --show-toplevel)
+SRC_ROOT_DIR=$(pwd)
 cd $SRC_ROOT_DIR/pulsar-client-cpp/pkg/deb
 
 POM_VERSION=`$SRC_ROOT_DIR/src/get-project-version.py`
 # Sanitize VERSION by removing `SNAPSHOT` if any since it's not legal in DEB
 VERSION=`echo $POM_VERSION | awk -F-  '{print $1}'`
 
-ROOT_DIR=apache-pulsar-$POM_VERSION
+ROOT_DIR=apache-pulsar-$POM_VERSION-src
 CPP_DIR=$ROOT_DIR/pulsar-client-cpp
 
 rm -rf BUILD
 mkdir BUILD
 cd BUILD
-tar xfz $SRC_ROOT_DIR/distribution/server/target/apache-pulsar-$POM_VERSION-src.tar.gz
+tar xfz $SRC_ROOT_DIR/target/apache-pulsar-$POM_VERSION-src.tar.gz
 pushd $CPP_DIR
 
 cmake . -DBUILD_TESTS=OFF -DLINK_STATIC=ON
-make pulsarShared pulsarStatic -j 3
+make pulsarShared pulsarSharedNossl pulsarStatic pulsarStaticWithDeps  -j 3
 popd
 
 DEST_DIR=apache-pulsar-client
@@ -68,11 +68,17 @@ mkdir -p $DEVEL_DEST_DIR/usr/include
 mkdir -p $DEST_DIR/usr/share/doc/pulsar-client-$VERSION
 mkdir -p $DEVEL_DEST_DIR/usr/share/doc/pulsar-client-dev-$VERSION
 
+ls $CPP_DIR/lib/libpulsar*
+
 cp -ar $CPP_DIR/include/pulsar $DEVEL_DEST_DIR/usr/include/
 cp $CPP_DIR/lib/libpulsar.a $DEVEL_DEST_DIR/usr/lib
+cp $CPP_DIR/lib/libpulsarwithdeps.a $DEVEL_DEST_DIR/usr/lib
 cp $CPP_DIR/lib/libpulsar.so.$POM_VERSION $DEST_DIR/usr/lib
+cp $CPP_DIR/lib/libpulsarnossl.so.$POM_VERSION $DEST_DIR/usr/lib
+
 pushd $DEST_DIR/usr/lib
 ln -s libpulsar.so.$POM_VERSION libpulsar.so
+ln -s libpulsarnossl.so.$POM_VERSION libpulsarnossl.so
 popd
 
 cp $ROOT_DIR/NOTICE $DEST_DIR/usr/share/doc/pulsar-client-$VERSION

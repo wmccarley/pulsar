@@ -16,6 +16,7 @@
  * specific language governing permissions and limitations
  * under the License.
  */
+#include <atomic>
 #include <ctime>
 #include <functional>
 #include <gtest/gtest.h>
@@ -25,6 +26,7 @@
 
 #include <lib/Commands.h>
 #include <lib/Future.h>
+#include <lib/Latch.h>
 #include <lib/LogUtils.h>
 #include <lib/TopicName.h>
 #include <lib/Utils.h>
@@ -41,7 +43,6 @@ DECLARE_LOG_OBJECT();
 
 using namespace pulsar;
 
-static int globalTestBatchMessagesCounter = 0;
 static int globalCount = 0;
 static std::string lookupUrl = "pulsar://localhost:6650";
 static std::string adminUrl = "http://localhost:8080/";
@@ -54,10 +55,19 @@ static void messageListenerFunction(Consumer consumer, const Message& msg) {
     consumer.acknowledge(msg);
 }
 
-static void sendCallBack(Result r, const MessageId& msgId) {
-    ASSERT_EQ(r, ResultOk);
-    globalTestBatchMessagesCounter++;
-}
+class MessageCountSendCallback {
+   public:
+    MessageCountSendCallback(std::atomic_int& numOfMessagesProduced)
+        : numOfMessagesProduced_(numOfMessagesProduced) {}
+
+    void operator()(Result result, const MessageId&) {
+        ASSERT_EQ(result, ResultOk);
+        numOfMessagesProduced_++;
+    }
+
+   private:
+    std::atomic_int& numOfMessagesProduced_;
+};
 
 static void sendFailCallBack(Result r, Result expect_result) { EXPECT_EQ(r, expect_result); }
 
@@ -77,9 +87,12 @@ TEST(BatchMessageTest, testProducerConfig) {
     try {
         conf.setBatchingMaxMessages(1);
         FAIL();
-    } catch (const char* ex) {
+    } catch (const std::exception&) {
         // Ok
     }
+    ASSERT_EQ(ProducerConfiguration::DefaultBatching, conf.getBatchingType());
+    conf.setBatchingType(ProducerConfiguration::KeyBasedBatching);
+    ASSERT_EQ(ProducerConfiguration::KeyBasedBatching, conf.getBatchingType());
 }
 
 TEST(BatchMessageTest, testProducerTimeout) {
@@ -171,7 +184,6 @@ TEST(BatchMessageTest, testProducerTimeout) {
 
 TEST(BatchMessageTest, testBatchSizeInBytes) {
     std::string testName = std::to_string(epochTime) + "testBatchSizeInBytes";
-    globalTestBatchMessagesCounter = 0;
 
     Client client(lookupUrl);
     std::string topicName = "persistent://public/default/" + testName;
@@ -212,12 +224,13 @@ TEST(BatchMessageTest, testBatchSizeInBytes) {
 
     ProducerStatsImplPtr producerStatsImplPtr = PulsarFriend::getProducerStatsPtr(producer);
     // Send Asynchronously
+    std::atomic_int numOfMessagesProduced{0};
     std::string prefix = "12345678";
     for (int i = 0; i < numOfMessages; i++) {
         std::string messageContent = prefix + std::to_string(i);
         Message msg =
             MessageBuilder().setContent(messageContent).setProperty("msgIndex", std::to_string(i)).build();
-        producer.sendAsync(msg, &sendCallBack);
+        producer.sendAsync(msg, MessageCountSendCallback(numOfMessagesProduced));
         ASSERT_EQ(producerStatsImplPtr->getNumMsgsSent(), i + 1);
         ASSERT_LT(PulsarFriend::sum(producerStatsImplPtr->getSendMap()), i + 1);
         ASSERT_EQ(producerStatsImplPtr->getTotalMsgsSent(), i + 1);
@@ -242,7 +255,7 @@ TEST(BatchMessageTest, testBatchSizeInBytes) {
     ASSERT_EQ(PulsarFriend::sum(producerStatsImplPtr->getTotalSendMap()), numOfMessages);
 
     // Number of messages produced
-    ASSERT_EQ(globalTestBatchMessagesCounter, numOfMessages);
+    ASSERT_EQ(numOfMessagesProduced.load(), numOfMessages);
 
     // Number of messages consumed
     ASSERT_EQ(i, numOfMessages);
@@ -250,7 +263,6 @@ TEST(BatchMessageTest, testBatchSizeInBytes) {
 
 TEST(BatchMessageTest, testSmallReceiverQueueSize) {
     std::string testName = std::to_string(epochTime) + "testSmallReceiverQueueSize";
-    globalTestBatchMessagesCounter = 0;
 
     ClientConfiguration clientConf;
     clientConf.setStatsIntervalInSeconds(20);
@@ -299,12 +311,13 @@ TEST(BatchMessageTest, testSmallReceiverQueueSize) {
 
     ProducerStatsImplPtr producerStatsImplPtr = PulsarFriend::getProducerStatsPtr(producer);
     // Send Asynchronously
+    std::atomic_int numOfMessagesProduced{0};
     std::string prefix = testName;
     for (int i = 0; i < numOfMessages; i++) {
         std::string messageContent = prefix + std::to_string(i);
         Message msg =
             MessageBuilder().setContent(messageContent).setProperty("msgIndex", std::to_string(i)).build();
-        producer.sendAsync(msg, &sendCallBack);
+        producer.sendAsync(msg, MessageCountSendCallback(numOfMessagesProduced));
         ASSERT_EQ(producerStatsImplPtr->getTotalMsgsSent(), i + 1);
         ASSERT_LE(PulsarFriend::sum(producerStatsImplPtr->getTotalSendMap()), i + 1);
         LOG_DEBUG("sending message " << messageContent);
@@ -339,7 +352,7 @@ TEST(BatchMessageTest, testSmallReceiverQueueSize) {
     ASSERT_EQ(PulsarFriend::sum(consumerStatsImplPtr->getReceivedMsgMap()), 0);
 
     // Number of messages produced
-    ASSERT_EQ(globalTestBatchMessagesCounter, numOfMessages);
+    ASSERT_EQ(numOfMessagesProduced.load(), numOfMessages);
 
     // Number of messages consumed
     ASSERT_EQ(i, numOfMessages);
@@ -391,15 +404,15 @@ TEST(BatchMessageTest, testIndividualAck) {
     ASSERT_EQ(consumer.getSubscriptionName(), subName);
 
     // Send Asynchronously
+    std::atomic_int numOfMessagesProduced{0};
     std::string prefix = testName;
     for (int i = 0; i < numOfMessages; i++) {
         std::string messageContent = prefix + std::to_string(i);
         Message msg =
             MessageBuilder().setContent(messageContent).setProperty("msgIndex", std::to_string(i)).build();
-        producer.sendAsync(msg, &sendCallBack);
+        producer.sendAsync(msg, MessageCountSendCallback(numOfMessagesProduced));
         LOG_DEBUG("sending message " << messageContent);
     }
-    globalTestBatchMessagesCounter = 0;
     Message receivedMsg;
     int i = 0;
     while (consumer.receive(receivedMsg, 5000) == ResultOk) {
@@ -414,7 +427,7 @@ TEST(BatchMessageTest, testIndividualAck) {
         }
     }
     // Number of messages produced
-    ASSERT_EQ(globalTestBatchMessagesCounter, numOfMessages);
+    ASSERT_EQ(numOfMessagesProduced.load(), numOfMessages);
 
     // Number of messages consumed
     ASSERT_EQ(i, numOfMessages);
@@ -507,8 +520,6 @@ TEST(BatchMessageTest, testCumulativeAck) {
     std::string subName = "subscription-name";
     Producer producer;
 
-    globalTestBatchMessagesCounter = 0;
-
     // Enable batching on producer side
     int batchSize = 5;
     int numOfMessages = 15;
@@ -545,12 +556,13 @@ TEST(BatchMessageTest, testCumulativeAck) {
     ProducerStatsImplPtr producerStatsImplPtr = PulsarFriend::getProducerStatsPtr(producer);
 
     // Send Asynchronously
+    std::atomic_int numOfMessagesProduced{0};
     std::string prefix = testName;
     for (int i = 0; i < numOfMessages; i++) {
         std::string messageContent = prefix + std::to_string(i);
         Message msg =
             MessageBuilder().setContent(messageContent).setProperty("msgIndex", std::to_string(i)).build();
-        producer.sendAsync(msg, &sendCallBack);
+        producer.sendAsync(msg, MessageCountSendCallback(numOfMessagesProduced));
         LOG_DEBUG("sending message " << messageContent);
     }
 
@@ -580,7 +592,7 @@ TEST(BatchMessageTest, testCumulativeAck) {
     ASSERT_EQ(t, 1);
 
     // Number of messages produced
-    ASSERT_EQ(globalTestBatchMessagesCounter, numOfMessages);
+    ASSERT_EQ(numOfMessagesProduced.load(), numOfMessages);
 
     // Number of messages consumed
     ASSERT_EQ(i, numOfMessages);
@@ -631,8 +643,6 @@ TEST(BatchMessageTest, testMixedAck) {
     std::string subName = "subscription-name";
     Producer producer;
 
-    globalTestBatchMessagesCounter = 0;
-
     // Enable batching on producer side
     int batchSize = 5;
     int numOfMessages = 15;
@@ -666,12 +676,13 @@ TEST(BatchMessageTest, testMixedAck) {
     ASSERT_EQ(consumer.getSubscriptionName(), subName);
 
     // Send Asynchronously
+    std::atomic_int numOfMessagesProduced{0};
     std::string prefix = testName;
     for (int i = 0; i < numOfMessages; i++) {
         std::string messageContent = prefix + std::to_string(i);
         Message msg =
             MessageBuilder().setContent(messageContent).setProperty("msgIndex", std::to_string(i)).build();
-        producer.sendAsync(msg, &sendCallBack);
+        producer.sendAsync(msg, MessageCountSendCallback(numOfMessagesProduced));
         LOG_DEBUG("sending message " << messageContent);
     }
 
@@ -689,7 +700,7 @@ TEST(BatchMessageTest, testMixedAck) {
         }
     }
     // Number of messages produced
-    ASSERT_EQ(globalTestBatchMessagesCounter, numOfMessages);
+    ASSERT_EQ(numOfMessagesProduced.load(), numOfMessages);
 
     // Number of messages consumed
     ASSERT_EQ(i, numOfMessages);
@@ -737,8 +748,6 @@ TEST(BatchMessageTest, testPermits) {
     std::string subName = "subscription-name";
     Producer producer;
 
-    globalTestBatchMessagesCounter = 0;
-
     // Enable batching on producer side
     int batchSize = 10;
     int numOfMessages = 75;
@@ -775,12 +784,13 @@ TEST(BatchMessageTest, testPermits) {
     ASSERT_EQ(consumer.getSubscriptionName(), subName);
 
     // Send Asynchronously
+    std::atomic_int numOfMessagesProduced{0};
     std::string prefix = testName;
     for (int i = 0; i < numOfMessages; i++) {
         std::string messageContent = prefix + std::to_string(i);
         Message msg =
             MessageBuilder().setContent(messageContent).setProperty("msgIndex", std::to_string(i)).build();
-        producer.sendAsync(msg, &sendCallBack);
+        producer.sendAsync(msg, MessageCountSendCallback(numOfMessagesProduced));
         LOG_DEBUG("sending message " << messageContent);
     }
 
@@ -798,7 +808,7 @@ TEST(BatchMessageTest, testPermits) {
         ASSERT_EQ(ResultOk, consumer.acknowledge(receivedMsg));
     }
     // Number of messages produced
-    ASSERT_EQ(globalTestBatchMessagesCounter, numOfMessages);
+    ASSERT_EQ(numOfMessagesProduced.load(), numOfMessages);
 
     // Number of messages consumed
     ASSERT_EQ(i, numOfMessages);
@@ -809,13 +819,13 @@ TEST(BatchMessageTest, testPermits) {
 
     client.createProducer(topicName, conf, producer);
 
-    globalTestBatchMessagesCounter = 0;
+    numOfMessagesProduced = 0;
     // Send Asynchronously
     for (int i = 0; i < numOfMessages; i++) {
         std::string messageContent = prefix + std::to_string(i);
         Message msg =
             MessageBuilder().setContent(messageContent).setProperty("msgIndex", std::to_string(i)).build();
-        producer.sendAsync(msg, &sendCallBack);
+        producer.sendAsync(msg, MessageCountSendCallback(numOfMessagesProduced));
         LOG_DEBUG("sending message " << messageContent);
     }
     std::this_thread::sleep_for(std::chrono::seconds(5));
@@ -833,7 +843,7 @@ TEST(BatchMessageTest, testPermits) {
         ASSERT_EQ(ResultOk, consumer.acknowledgeCumulative(receivedMsg));
     }
     // Number of messages produced
-    ASSERT_EQ(globalTestBatchMessagesCounter, numOfMessages);
+    ASSERT_EQ(numOfMessagesProduced.load(), numOfMessages);
 
     // Number of messages consumed
     ASSERT_EQ(i, numOfMessages);
@@ -982,4 +992,89 @@ TEST(BatchMessageTest, testPraseMessageBatchEntry) {
         ASSERT_EQ(message.getDataAsString(), expected.content);
         ASSERT_EQ(message.getProperty(expected.propKey), expected.propValue);
     }
+}
+
+TEST(BatchMessageTest, testSendCallback) {
+    const std::string topicName = "persistent://public/default/BasicMessageTest-testSendCallback";
+
+    Client client(lookupUrl);
+
+    constexpr int numMessagesOfBatch = 3;
+
+    ProducerConfiguration producerConfig;
+    producerConfig.setBatchingEnabled(true);
+    producerConfig.setBatchingMaxMessages(numMessagesOfBatch);
+    producerConfig.setBatchingMaxPublishDelayMs(1000);  // 1 s, it's long enough for 3 messages batched
+    producerConfig.setMaxPendingMessages(5);
+
+    Producer producer;
+    ASSERT_EQ(ResultOk, client.createProducer(topicName, producerConfig, producer));
+
+    Consumer consumer;
+    ASSERT_EQ(ResultOk, client.subscribe(topicName, "SubscriptionName", consumer));
+
+    Latch latch(numMessagesOfBatch);
+    std::set<MessageId> sentIdSet;
+    for (int i = 0; i < numMessagesOfBatch; i++) {
+        const auto msg = MessageBuilder().setContent("a").build();
+        producer.sendAsync(msg, [&sentIdSet, i, &latch](Result result, const MessageId& id) {
+            ASSERT_EQ(ResultOk, result);
+            ASSERT_EQ(i, id.batchIndex());
+            sentIdSet.emplace(id);
+            LOG_INFO("id of batch " << i << ": " << id);
+            latch.countdown();
+        });
+    }
+
+    std::set<MessageId> receivedIdSet;
+    for (int i = 0; i < numMessagesOfBatch; i++) {
+        Message msg;
+        ASSERT_EQ(ResultOk, consumer.receive(msg));
+        receivedIdSet.emplace(msg.getMessageId());
+        consumer.acknowledge(msg);
+    }
+
+    latch.wait();
+    ASSERT_EQ(sentIdSet, receivedIdSet);
+
+    consumer.close();
+    producer.close();
+    client.close();
+}
+
+TEST(BatchMessageTest, testProducerQueueWithBatches) {
+    std::string testName = std::to_string(epochTime) + "testProducerQueueWithBatches";
+
+    ClientConfiguration clientConf;
+    clientConf.setStatsIntervalInSeconds(0);
+
+    Client client(lookupUrl, clientConf);
+    std::string topicName = "persistent://public/default/" + testName;
+
+    // Enable batching on producer side
+    ProducerConfiguration conf;
+    conf.setBlockIfQueueFull(false);
+    conf.setMaxPendingMessages(10);
+    conf.setBatchingMaxMessages(10000);
+    conf.setBatchingMaxPublishDelayMs(1000);
+    conf.setBatchingEnabled(true);
+
+    Producer producer;
+    Result result = client.createProducer(topicName, conf, producer);
+    ASSERT_EQ(ResultOk, result);
+
+    std::string prefix = "msg-batch-test-produce-timeout-";
+    int rejectedMessges = 0;
+    for (int i = 0; i < 20; i++) {
+        std::string messageContent = prefix + std::to_string(i);
+        Message msg = MessageBuilder().setContent("hello").build();
+
+        producer.sendAsync(msg, [&rejectedMessges](Result result, const MessageId& id) {
+            if (result == ResultProducerQueueIsFull) {
+                ++rejectedMessges;
+            }
+        });
+    }
+
+    ASSERT_EQ(rejectedMessges, 10);
 }

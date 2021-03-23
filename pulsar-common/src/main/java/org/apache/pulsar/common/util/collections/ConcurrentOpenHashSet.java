@@ -20,11 +20,11 @@ package org.apache.pulsar.common.util.collections;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
-
 import com.google.common.collect.Lists;
 import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 import java.util.concurrent.locks.StampedLock;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
@@ -75,23 +75,23 @@ public class ConcurrentOpenHashSet<V> {
 
     public long size() {
         long size = 0;
-        for (Section<V> s : sections) {
-            size += s.size;
+        for (int i = 0; i < sections.length; i++) {
+            size += sections[i].size;
         }
         return size;
     }
 
     public long capacity() {
         long capacity = 0;
-        for (Section<V> s : sections) {
-            capacity += s.capacity;
+        for (int i = 0; i < sections.length; i++) {
+            capacity += sections[i].capacity;
         }
         return capacity;
     }
 
     public boolean isEmpty() {
-        for (Section<V> s : sections) {
-            if (s.size != 0) {
+        for (int i = 0; i < sections.length; i++) {
+            if (sections[i].size != 0) {
                 return false;
             }
         }
@@ -124,14 +124,14 @@ public class ConcurrentOpenHashSet<V> {
     }
 
     public void clear() {
-        for (Section<V> s : sections) {
-            s.clear();
+        for (int i = 0; i < sections.length; i++) {
+            sections[i].clear();
         }
     }
 
     public void forEach(Consumer<? super V> processor) {
-        for (Section<V> s : sections) {
-            s.forEach(processor);
+        for (int i = 0; i < sections.length; i++) {
+            sections[i].forEach(processor);
         }
     }
 
@@ -139,8 +139,8 @@ public class ConcurrentOpenHashSet<V> {
         checkNotNull(filter);
 
         int removedCount = 0;
-        for (Section<V> s : sections) {
-            removedCount += s.removeIf(filter);
+        for (int i = 0; i < sections.length; i++) {
+            removedCount += sections[i].removeIf(filter);
         }
 
         return removedCount;
@@ -177,6 +177,8 @@ public class ConcurrentOpenHashSet<V> {
         private volatile V[] values;
 
         private volatile int capacity;
+        private static final AtomicIntegerFieldUpdater<Section> SIZE_UPDATER =
+                AtomicIntegerFieldUpdater.newUpdater(Section.class, "size");
         private volatile int size;
         private int usedBuckets;
         private int resizeThreshold;
@@ -270,7 +272,7 @@ public class ConcurrentOpenHashSet<V> {
                         }
 
                         values[bucket] = value;
-                        ++size;
+                        SIZE_UPDATER.incrementAndGet(this);
                         return true;
                     } else if (storedValue == DeletedValue) {
                         // The bucket contained a different deleted key
@@ -305,7 +307,7 @@ public class ConcurrentOpenHashSet<V> {
 
                     V storedValue = values[bucket];
                     if (value.equals(storedValue)) {
-                        --size;
+                        SIZE_UPDATER.decrementAndGet(this);
                         cleanBucket(bucket);
                         return true;
                     } else if (storedValue == EmptyValue) {
@@ -345,7 +347,7 @@ public class ConcurrentOpenHashSet<V> {
                     if (storedValue != DeletedValue && storedValue != EmptyValue) {
                         if (filter.test(storedValue)) {
                             // Removing item
-                            --size;
+                            SIZE_UPDATER.decrementAndGet(this);
                             ++removedCount;
                             cleanBucket(bucket);
                         }
@@ -369,44 +371,33 @@ public class ConcurrentOpenHashSet<V> {
         }
 
         public void forEach(Consumer<? super V> processor) {
-            long stamp = tryOptimisticRead();
-
-            int capacity = this.capacity;
             V[] values = this.values;
 
-            boolean acquiredReadLock = false;
+            // Go through all the buckets for this section. We try to renew the stamp only after a validation
+            // error, otherwise we keep going with the same.
+            long stamp = 0;
+            for (int bucket = 0; bucket < capacity; bucket++) {
+                if (stamp == 0) {
+                    stamp = tryOptimisticRead();
+                }
 
-            try {
+                V storedValue = values[bucket];
 
-                // Validate no rehashing
                 if (!validate(stamp)) {
-                    // Fallback to read lock
+                    // Fallback to acquiring read lock
                     stamp = readLock();
-                    acquiredReadLock = true;
 
-                    capacity = this.capacity;
-                    values = this.values;
-                }
-
-                // Go through all the buckets for this section
-                for (int bucket = 0; bucket < capacity; bucket++) {
-                    V storedValue = values[bucket];
-
-                    if (!acquiredReadLock && !validate(stamp)) {
-                        // Fallback to acquiring read lock
-                        stamp = readLock();
-                        acquiredReadLock = true;
-
+                    try {
                         storedValue = values[bucket];
+                    } finally {
+                        unlockRead(stamp);
                     }
 
-                    if (storedValue != DeletedValue && storedValue != EmptyValue) {
-                        processor.accept(storedValue);
-                    }
+                    stamp = 0;
                 }
-            } finally {
-                if (acquiredReadLock) {
-                    unlockRead(stamp);
+
+                if (storedValue != DeletedValue && storedValue != EmptyValue) {
+                    processor.accept(storedValue);
                 }
             }
         }

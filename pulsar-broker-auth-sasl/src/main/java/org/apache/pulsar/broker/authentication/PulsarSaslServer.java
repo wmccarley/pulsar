@@ -38,7 +38,6 @@ import javax.security.sasl.SaslServer;
 
 import lombok.extern.slf4j.Slf4j;
 import org.apache.pulsar.common.api.AuthData;
-import org.apache.pulsar.common.sasl.KerberosName;
 import org.apache.pulsar.common.sasl.SaslConstants;
 
 
@@ -76,8 +75,8 @@ public class PulsarSaslServer {
                 int indexOf = servicePrincipalNameAndHostname.indexOf("/");
 
                 // e.g. serviceHostnameAndKerbDomain := "myhost.foo.com@EXAMPLE.COM"
-                final String serviceHostnameAndKerbDomain = servicePrincipalNameAndHostname.substring(indexOf + 1,
-                    servicePrincipalNameAndHostname.length());
+                final String serviceHostnameAndKerbDomain = servicePrincipalNameAndHostname.substring(indexOf + 1
+                );
                 int indexOfAt = serviceHostnameAndKerbDomain.indexOf("@");
 
                 // Handle Kerberos Service as well as User Principal Names

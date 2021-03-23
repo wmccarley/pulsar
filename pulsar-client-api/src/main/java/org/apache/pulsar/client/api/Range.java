@@ -18,9 +18,14 @@
  */
 package org.apache.pulsar.client.api;
 
+import org.apache.pulsar.common.classification.InterfaceAudience;
+import org.apache.pulsar.common.classification.InterfaceStability;
+
 /**
  * Int range.
  */
+@InterfaceAudience.Public
+@InterfaceStability.Stable
 public class Range {
 
     private final int start;
@@ -48,8 +53,8 @@ public class Range {
     }
 
     public Range intersect(Range range) {
-        int start = range.getStart() > this.getStart() ? range.getStart() : this.getStart();
-        int end = range.getEnd() < this.getEnd() ? range.getEnd() : this.getEnd();
+        int start = Math.max(range.getStart(), this.getStart());
+        int end = Math.min(range.getEnd(), this.getEnd());
         if (end >= start) {
             return Range.of(start, end);
         } else {

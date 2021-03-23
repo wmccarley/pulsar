@@ -50,6 +50,7 @@ import org.apache.pulsar.broker.authentication.AuthenticationDataHttps;
 import org.apache.pulsar.broker.authentication.AuthenticationDataSource;
 import org.apache.pulsar.broker.authorization.AuthorizationService;
 import org.apache.pulsar.common.naming.TopicName;
+import org.apache.pulsar.common.util.RestException;
 import org.apache.pulsar.websocket.WebSocketService;
 
 public class WebSocketWebResourceTest {
@@ -126,7 +127,7 @@ public class WebSocketWebResourceTest {
         topicName = TopicName.get("persistent://tenant/cluster/ns/dest");
     }
 
-    @AfterMethod
+    @AfterMethod(alwaysRun = true)
     public void cleanup() throws Exception {
         this.webResource = null;
     }

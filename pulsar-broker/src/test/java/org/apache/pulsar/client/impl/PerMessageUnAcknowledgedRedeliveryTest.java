@@ -36,6 +36,7 @@ import org.testng.annotations.AfterMethod;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
+@Test(groups = "broker-impl")
 public class PerMessageUnAcknowledgedRedeliveryTest extends BrokerTestBase {
     private static final long testTimeout = 90000; // 1.5 min
     private static final Logger log = LoggerFactory.getLogger(PerMessageUnAcknowledgedRedeliveryTest.class);
@@ -48,7 +49,7 @@ public class PerMessageUnAcknowledgedRedeliveryTest extends BrokerTestBase {
     }
 
     @Override
-    @AfterMethod
+    @AfterMethod(alwaysRun = true)
     public void cleanup() throws Exception {
         super.internalCleanup();
     }
@@ -403,7 +404,8 @@ public class PerMessageUnAcknowledgedRedeliveryTest extends BrokerTestBase {
         final String messagePredicate = "my-message-" + key + "-";
         final int totalMessages = 15;
         final int numberOfPartitions = 3;
-        admin.tenants().createTenant("prop", new TenantInfo());
+        TenantInfo tenantInfo = createDefaultTenantInfo();
+        admin.tenants().createTenant("prop", tenantInfo);
         admin.topics().createPartitionedTopic(topicName, numberOfPartitions);
 
         // 1. producer connect

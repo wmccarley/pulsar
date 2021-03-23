@@ -25,11 +25,7 @@ import static org.testng.Assert.assertTrue;
 
 import com.google.common.collect.Lists;
 
-import java.util.HashSet;
-import java.util.List;
-import java.util.Random;
-import java.util.Set;
-import java.util.UUID;
+import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
@@ -58,6 +54,7 @@ import org.testng.annotations.BeforeClass;
 import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
+@Test(groups = "broker")
 public class BatchMessageTest extends BrokerTestBase {
 
     @BeforeClass
@@ -66,7 +63,7 @@ public class BatchMessageTest extends BrokerTestBase {
         super.baseSetup();
     }
 
-    @AfterClass
+    @AfterClass(alwaysRun = true)
     @Override
     protected void cleanup() throws Exception {
         super.internalCleanup();
@@ -121,7 +118,7 @@ public class BatchMessageTest extends BrokerTestBase {
         assertTrue(topic.getProducers().values().iterator().next().getStats().msgRateIn > 0.0);
         // we expect 2 messages in the backlog since we sent 50 messages with the batch size set to 25. We have set the
         // batch time high enough for it to not affect the number of messages in the batch
-        assertEquals(topic.getSubscription(subscriptionName).getNumberOfEntriesInBacklog(), 2);
+        assertEquals(topic.getSubscription(subscriptionName).getNumberOfEntriesInBacklog(false), 2);
         consumer = pulsarClient.newConsumer().topic(topicName).subscriptionName(subscriptionName).subscribe();
 
         for (int i = 0; i < numMsgs; i++) {
@@ -170,7 +167,7 @@ public class BatchMessageTest extends BrokerTestBase {
         assertTrue(topic.getProducers().values().iterator().next().getStats().msgRateIn > 0.0);
         // we expect 2 messages in the backlog since we sent 50 messages with the batch size set to 25. We have set the
         // batch time high enough for it to not affect the number of messages in the batch
-        assertEquals(topic.getSubscription(subscriptionName).getNumberOfEntriesInBacklog(), 2);
+        assertEquals(topic.getSubscription(subscriptionName).getNumberOfEntriesInBacklog(false), 2);
         consumer = pulsarClient.newConsumer().topic(topicName).subscriptionName(subscriptionName).subscribe();
 
         for (int i = 0; i < numMsgs; i++) {
@@ -215,8 +212,8 @@ public class BatchMessageTest extends BrokerTestBase {
         rolloverPerIntervalStats();
         assertTrue(topic.getProducers().values().iterator().next().getStats().msgRateIn > 0.0);
         LOG.info("Sent {} messages, backlog is {} messages", numMsgs,
-                topic.getSubscription(subscriptionName).getNumberOfEntriesInBacklog());
-        assertTrue(topic.getSubscription(subscriptionName).getNumberOfEntriesInBacklog() < numMsgs);
+                topic.getSubscription(subscriptionName).getNumberOfEntriesInBacklog(false));
+        assertTrue(topic.getSubscription(subscriptionName).getNumberOfEntriesInBacklog(false) < numMsgs);
 
         producer.close();
     }
@@ -251,8 +248,8 @@ public class BatchMessageTest extends BrokerTestBase {
         rolloverPerIntervalStats();
         assertTrue(topic.getProducers().values().iterator().next().getStats().msgRateIn > 0.0);
         LOG.info("Sent {} messages, backlog is {} messages", numMsgs,
-                topic.getSubscription(subscriptionName).getNumberOfEntriesInBacklog());
-        assertTrue(topic.getSubscription(subscriptionName).getNumberOfEntriesInBacklog() < numMsgs);
+                topic.getSubscription(subscriptionName).getNumberOfEntriesInBacklog(false));
+        assertTrue(topic.getSubscription(subscriptionName).getNumberOfEntriesInBacklog(false) < numMsgs);
 
         producer.close();
     }
@@ -298,7 +295,7 @@ public class BatchMessageTest extends BrokerTestBase {
         assertTrue(topic.getProducers().values().iterator().next().getStats().msgRateIn > 0.0);
         // we expect 3 messages in the backlog since the large message in the middle should
         // close out the batch and be sent in a batch of its own
-        assertEquals(topic.getSubscription(subscriptionName).getNumberOfEntriesInBacklog(), 3);
+        assertEquals(topic.getSubscription(subscriptionName).getNumberOfEntriesInBacklog(false), 3);
         consumer = pulsarClient.newConsumer()
                 .topic(topicName)
                 .subscriptionName(subscriptionName)
@@ -308,11 +305,11 @@ public class BatchMessageTest extends BrokerTestBase {
         for (int i = 0; i <= numMsgs; i++) {
             Message<byte[]> msg = consumer.receive(5, TimeUnit.SECONDS);
             assertNotNull(msg);
-            LOG.info("received msg - {}", msg.getData().toString());
+            LOG.info("received msg - {}", Arrays.toString(msg.getData()));
             consumer.acknowledge(msg);
         }
         Thread.sleep(100);
-        assertEquals(topic.getSubscription(subscriptionName).getNumberOfEntriesInBacklog(), 0);
+        assertEquals(topic.getSubscription(subscriptionName).getNumberOfEntriesInBacklog(false), 0);
         consumer.close();
         producer.close();
     }
@@ -354,7 +351,7 @@ public class BatchMessageTest extends BrokerTestBase {
 
         rolloverPerIntervalStats();
         assertTrue(topic.getProducers().values().iterator().next().getStats().msgRateIn > 0.0);
-        assertEquals(topic.getSubscription(subscriptionName).getNumberOfEntriesInBacklog(), numMsgs / numMsgsInBatch);
+        assertEquals(topic.getSubscription(subscriptionName).getNumberOfEntriesInBacklog(false), numMsgs / numMsgsInBatch);
         consumer = pulsarClient.newConsumer().topic(topicName).subscriptionName(subscriptionName).subscribe();
 
         Message<byte[]> lastunackedMsg = null;
@@ -371,7 +368,7 @@ public class BatchMessageTest extends BrokerTestBase {
             consumer.acknowledgeCumulative(lastunackedMsg);
         }
         Thread.sleep(100);
-        assertEquals(topic.getSubscription(subscriptionName).getNumberOfEntriesInBacklog(), 0);
+        assertEquals(topic.getSubscription(subscriptionName).getNumberOfEntriesInBacklog(false), 0);
         consumer.close();
         producer.close();
     }
@@ -403,7 +400,7 @@ public class BatchMessageTest extends BrokerTestBase {
         assertTrue(topic.getProducers().values().iterator().next().getStats().msgRateIn > 0.0);
         // we expect 10 messages in the backlog since we sent 10 messages with the batch size set to 5.
         // However, we are using synchronous send and so each message will go as an individual message
-        assertEquals(topic.getSubscription(subscriptionName).getNumberOfEntriesInBacklog(), 10);
+        assertEquals(topic.getSubscription(subscriptionName).getNumberOfEntriesInBacklog(false), 10);
         consumer = pulsarClient.newConsumer().topic(topicName).subscriptionName(subscriptionName).subscribe();
 
         for (int i = 0; i < numMsgs; i++) {
@@ -416,7 +413,6 @@ public class BatchMessageTest extends BrokerTestBase {
         }
         consumer.close();
         producer.close();
-
     }
 
     @Test(dataProvider = "containerBuilder")
@@ -456,9 +452,9 @@ public class BatchMessageTest extends BrokerTestBase {
         PersistentTopic topic = (PersistentTopic) pulsar.getBrokerService().getTopicReference(topicName).get();
 
         // allow stats to be updated..
-        LOG.info("[{}] checking backlog stats..");
+        LOG.info("[{}] checking backlog stats..", topic);
         rolloverPerIntervalStats();
-        assertEquals(topic.getSubscription(subscriptionName).getNumberOfEntriesInBacklog(), numMsgs / numMsgsInBatch);
+        assertEquals(topic.getSubscription(subscriptionName).getNumberOfEntriesInBacklog(false), numMsgs / numMsgsInBatch);
         consumer = pulsarClient.newConsumer().topic(topicName).subscriptionName(subscriptionName).subscribe();
 
         Message<byte[]> lastunackedMsg = null;
@@ -473,7 +469,7 @@ public class BatchMessageTest extends BrokerTestBase {
 
         consumer.close();
         producer.close();
-        assertEquals(topic.getSubscription(subscriptionName).getNumberOfEntriesInBacklog(), 0);
+        assertEquals(topic.getSubscription(subscriptionName).getNumberOfEntriesInBacklog(false), 0);
     }
 
     // test for ack holes
@@ -482,7 +478,7 @@ public class BatchMessageTest extends BrokerTestBase {
      * on broker) individual ack on 6-10. (if ack type individual on bid 5, then hole remains which is ok) 0 2 1-10 0 3
      * 1-10
      */
-    @Test
+    @Test(groups = "broker")
     public void testOutOfOrderAcksForBatchMessage() throws Exception {
         int numMsgs = 40;
         int numMsgsInBatch = numMsgs / 4;
@@ -507,7 +503,7 @@ public class BatchMessageTest extends BrokerTestBase {
         PersistentTopic topic = (PersistentTopic) pulsar.getBrokerService().getTopicReference(topicName).get();
 
         rolloverPerIntervalStats();
-        assertEquals(topic.getSubscription(subscriptionName).getNumberOfEntriesInBacklog(), numMsgs / numMsgsInBatch);
+        assertEquals(topic.getSubscription(subscriptionName).getNumberOfEntriesInBacklog(false), numMsgs / numMsgsInBatch);
         consumer = pulsarClient.newConsumer().topic(topicName).subscriptionName(subscriptionName).subscribe();
         Set<Integer> individualAcks = new HashSet<>();
         for (int i = 15; i < 20; i++) {
@@ -528,7 +524,7 @@ public class BatchMessageTest extends BrokerTestBase {
                 Thread.sleep(1000);
                 rolloverPerIntervalStats();
                 Thread.sleep(1000);
-                assertEquals(topic.getSubscription(subscriptionName).getNumberOfEntriesInBacklog(), 3);
+                assertEquals(topic.getSubscription(subscriptionName).getNumberOfEntriesInBacklog(false), 3);
             } else if (individualAcks.contains(i)) {
                 consumer.acknowledge(msg);
             } else {
@@ -537,12 +533,12 @@ public class BatchMessageTest extends BrokerTestBase {
         }
         Thread.sleep(1000);
         rolloverPerIntervalStats();
-        assertEquals(topic.getSubscription(subscriptionName).getNumberOfEntriesInBacklog(), 2);
+        assertEquals(topic.getSubscription(subscriptionName).getNumberOfEntriesInBacklog(false), 2);
         if (lastunackedMsg != null) {
             consumer.acknowledgeCumulative(lastunackedMsg);
         }
         Thread.sleep(100);
-        assertEquals(topic.getSubscription(subscriptionName).getNumberOfEntriesInBacklog(), 0);
+        assertEquals(topic.getSubscription(subscriptionName).getNumberOfEntriesInBacklog(false), 0);
         consumer.close();
         producer.close();
     }
@@ -562,6 +558,7 @@ public class BatchMessageTest extends BrokerTestBase {
                 .batchingMaxPublishDelay(5, TimeUnit.SECONDS).batchingMaxMessages(numMsgsInBatch).enableBatching(true)
                 .batcherBuilder(builder)
                 .create();
+
         // create producer to publish non batch messages
         Producer<byte[]> noBatchProducer = pulsarClient.newProducer().topic(topicName).create();
 
@@ -580,7 +577,7 @@ public class BatchMessageTest extends BrokerTestBase {
 
         rolloverPerIntervalStats();
         assertTrue(topic.getProducers().values().iterator().next().getStats().msgRateIn > 0.0);
-        assertEquals(topic.getSubscription(subscriptionName).getNumberOfEntriesInBacklog(), 2);
+        assertEquals(topic.getSubscription(subscriptionName).getNumberOfEntriesInBacklog(false), 2);
         consumer = pulsarClient.newConsumer().topic(topicName).subscriptionName(subscriptionName).subscribe();
 
         Message<byte[]> lastunackedMsg = null;
@@ -589,12 +586,10 @@ public class BatchMessageTest extends BrokerTestBase {
             assertNotNull(msg);
             lastunackedMsg = msg;
         }
-        if (lastunackedMsg != null) {
-            consumer.acknowledgeCumulative(lastunackedMsg);
-        }
+        consumer.acknowledgeCumulative(lastunackedMsg);
         Thread.sleep(100);
         rolloverPerIntervalStats();
-        assertEquals(topic.getSubscription(subscriptionName).getNumberOfEntriesInBacklog(), 0);
+        assertEquals(topic.getSubscription(subscriptionName).getNumberOfEntriesInBacklog(false), 0);
         consumer.close();
         producer.close();
         noBatchProducer.close();
@@ -637,7 +632,7 @@ public class BatchMessageTest extends BrokerTestBase {
 
         rolloverPerIntervalStats();
         assertTrue(topic.getProducers().values().iterator().next().getStats().msgRateIn > 0.0);
-        assertEquals(topic.getSubscription(subscriptionName).getNumberOfEntriesInBacklog(),
+        assertEquals(topic.getSubscription(subscriptionName).getNumberOfEntriesInBacklog(false),
                 (numMsgs / 2) / numMsgsInBatch + numMsgs / 2);
         consumer = pulsarClient.newConsumer()
                     .topic(topicName)
@@ -650,7 +645,7 @@ public class BatchMessageTest extends BrokerTestBase {
             Message<byte[]> msg = consumer.receive(5, TimeUnit.SECONDS);
             assertNotNull(msg);
             LOG.info("[{}] got message position{} data {}", subscriptionName, msg.getMessageId(),
-                    String.valueOf(msg.getData()));
+                    Arrays.toString(msg.getData()));
             if (i % 2 == 0) {
                 lastunackedMsg = msg;
             } else {
@@ -658,11 +653,9 @@ public class BatchMessageTest extends BrokerTestBase {
                 LOG.info("[{}] did cumulative ack on position{} ", subscriptionName, msg.getMessageId());
             }
         }
-        if (lastunackedMsg != null) {
-            consumer.acknowledgeCumulative(lastunackedMsg);
-        }
+        consumer.acknowledgeCumulative(lastunackedMsg);
 
-        retryStrategically(t -> topic.getSubscription(subscriptionName).getNumberOfEntriesInBacklog() == 0, 100, 100);
+        retryStrategically(t -> topic.getSubscription(subscriptionName).getNumberOfEntriesInBacklog(false) == 0, 100, 100);
 
         consumer.close();
         producer.close();
@@ -721,7 +714,7 @@ public class BatchMessageTest extends BrokerTestBase {
         PersistentDispatcherMultipleConsumers dispatcher = (PersistentDispatcherMultipleConsumers) topic
                 .getSubscription(subscriptionName).getDispatcher();
         // check strategically to let ack-message receive by broker
-        retryStrategically((test) -> dispatcher.getConsumers().get(0).getUnackedMessages() == 0, 5, 150);
+        retryStrategically((test) -> dispatcher.getConsumers().get(0).getUnackedMessages() == 0, 50, 150);
         assertEquals(dispatcher.getConsumers().get(0).getUnackedMessages(), 0);
 
         executor.shutdown();
@@ -753,16 +746,17 @@ public class BatchMessageTest extends BrokerTestBase {
         }
         FutureUtil.waitForAll(sendFutureList).get();
 
+        String receivedKey = "";
+        int receivedMessageIndex = 0;
         for (int i = 0; i < 30; i++) {
             Message<byte[]> received = consumer.receive();
-            if (i < 10) {
-                assertEquals(received.getKey(), "key-1");
-            } else if (i < 20) {
-                assertEquals(received.getKey(), "key-2");
-            } else {
-                assertEquals(received.getKey(), "key-3");
+            if (!received.getKey().equals(receivedKey)) {
+                receivedKey = received.getKey();
+                receivedMessageIndex = 0;
             }
+            assertEquals(new String(received.getValue()), "my-message-" + receivedMessageIndex % 10);
             consumer.acknowledge(received);
+            receivedMessageIndex++;
         }
 
         for (int i = 0; i < 10; i++) {
@@ -777,16 +771,17 @@ public class BatchMessageTest extends BrokerTestBase {
         }
         FutureUtil.waitForAll(sendFutureList).get();
 
+        receivedKey = "";
+        receivedMessageIndex = 0;
         for (int i = 0; i < 30; i++) {
             Message<byte[]> received = consumer.receive();
-            if (i < 10) {
-                assertEquals(new String(received.getOrderingKey()), "key-1");
-            } else if (i < 20) {
-                assertEquals(new String(received.getOrderingKey()), "key-2");
-            } else {
-                assertEquals(new String(received.getOrderingKey()), "key-3");
+            if (!new String(received.getOrderingKey()).equals(receivedKey)) {
+                receivedKey = new String(received.getOrderingKey());
+                receivedMessageIndex = 0;
             }
+            assertEquals(new String(received.getValue()), "my-message-" + receivedMessageIndex % 10);
             consumer.acknowledge(received);
+            receivedMessageIndex++;
         }
 
         consumer.close();

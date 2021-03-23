@@ -19,6 +19,8 @@
 package org.apache.pulsar.websocket.proxy;
 
 import static java.util.concurrent.Executors.newFixedThreadPool;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.spy;
 
@@ -29,10 +31,10 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
-import org.apache.bookkeeper.test.PortManager;
 import org.apache.pulsar.client.api.TlsProducerConsumerBase;
 import org.apache.pulsar.client.impl.auth.AuthenticationTls;
 import org.apache.pulsar.common.util.SecurityUtility;
+import org.apache.pulsar.metadata.impl.ZKMetadataStore;
 import org.apache.pulsar.websocket.WebSocketService;
 import org.apache.pulsar.websocket.service.ProxyServer;
 import org.apache.pulsar.websocket.service.WebSocketProxyConfiguration;
@@ -48,10 +50,9 @@ import org.testng.annotations.AfterMethod;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
+@Test(groups = "websocket")
 public class ProxyPublishConsumeTlsTest extends TlsProducerConsumerBase {
     protected String methodName;
-    private int port;
-    private int tlsPort;
 
     private ProxyServer proxyServer;
     private WebSocketService service;
@@ -61,11 +62,9 @@ public class ProxyPublishConsumeTlsTest extends TlsProducerConsumerBase {
         super.setup();
         super.internalSetUpForNamespace();
 
-        port = PortManager.nextFreePort();
-        tlsPort = PortManager.nextFreePort();
         WebSocketProxyConfiguration config = new WebSocketProxyConfiguration();
-        config.setWebServicePort(Optional.of(port));
-        config.setWebServicePortTls(Optional.of(tlsPort));
+        config.setWebServicePort(Optional.of(0));
+        config.setWebServicePortTls(Optional.of(0));
         config.setBrokerClientTlsEnabled(true);
         config.setTlsKeyFilePath(TLS_SERVER_KEY_FILE_PATH);
         config.setTlsCertificateFilePath(TLS_SERVER_CERT_FILE_PATH);
@@ -75,28 +74,32 @@ public class ProxyPublishConsumeTlsTest extends TlsProducerConsumerBase {
         config.setConfigurationStoreServers("dummy-zk-servers");
         config.setBrokerClientAuthenticationParameters("tlsCertFile:" + TLS_CLIENT_CERT_FILE_PATH + ",tlsKeyFile:" + TLS_CLIENT_KEY_FILE_PATH);
         config.setBrokerClientAuthenticationPlugin(AuthenticationTls.class.getName());
-        String lookupUrl = new URI("pulsar://localhost:" + BROKER_PORT_TLS).toString();
+        config.setConfigurationStoreServers(GLOBAL_DUMMY_VALUE);
         service = spy(new WebSocketService(config));
-        doReturn(mockZooKeeperClientFactory).when(service).getZooKeeperClientFactory();
+        doReturn(new ZKMetadataStore(mockZooKeeperGlobal)).when(service).createMetadataStore(anyString(), anyInt());
         proxyServer = new ProxyServer(config);
         WebSocketServiceStarter.start(proxyServer, service);
         log.info("Proxy Server Started");
     }
 
-    @AfterMethod
+    @AfterMethod(alwaysRun = true)
     protected void cleanup() throws Exception {
         super.cleanup();
-        service.close();
-        proxyServer.stop();
+        if (service != null) {
+            service.close();
+        }
+        if (proxyServer != null) {
+            proxyServer.stop();
+        }
         log.info("Finished Cleaning Up Test setup");
 
     }
 
     @Test(timeOut = 30000)
-    public void socketTest() throws InterruptedException, GeneralSecurityException {
+    public void socketTest() throws GeneralSecurityException {
         String consumerUri =
-                "wss://localhost:" + tlsPort + "/ws/consumer/persistent/my-property/use/my-ns/my-topic/my-sub";
-        String producerUri = "wss://localhost:" + tlsPort + "/ws/producer/persistent/my-property/use/my-ns/my-topic/";
+                "wss://localhost:" + proxyServer.getListenPortHTTPS().get() + "/ws/consumer/persistent/my-property/use/my-ns/my-topic/my-sub";
+        String producerUri = "wss://localhost:" + proxyServer.getListenPortHTTPS().get() + "/ws/producer/persistent/my-property/use/my-ns/my-topic/";
         URI consumeUri = URI.create(consumerUri);
         URI produceUri = URI.create(producerUri);
 

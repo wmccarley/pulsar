@@ -58,7 +58,8 @@ public class FunctionsCLITest extends PulsarFunctionsTestBase {
         return bkPkgPath;
     }
 
-    @Test
+    // Flaky Test: https://github.com/apache/pulsar/issues/6179
+    // @Test
     public void testUploadDownload() throws Exception {
         String bkPkgPath = uploadFunction();
         String localPkgFile = "/tmp/checkdownload-" + randomName(16);
@@ -84,8 +85,7 @@ public class FunctionsCLITest extends PulsarFunctionsTestBase {
         };
         output = container.execCmd(diffCommand);
         assertEquals(0, output.getExitCode());
-        assertTrue(output.getStdout().isEmpty());
-        assertTrue(output.getStderr().isEmpty());
+        output.assertNoOutput();
     }
 
 

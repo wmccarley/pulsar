@@ -18,8 +18,10 @@
  */
 package org.apache.pulsar.functions.worker;
 
+import static java.nio.file.StandardCopyOption.REPLACE_EXISTING;
+import static org.apache.commons.lang3.StringUtils.isNotBlank;
+
 import lombok.extern.slf4j.Slf4j;
-import org.apache.commons.lang3.StringUtils;
 import org.apache.distributedlog.AppendOnlyStreamWriter;
 import org.apache.distributedlog.DistributedLogConfiguration;
 import org.apache.distributedlog.api.DistributedLogManager;
@@ -30,10 +32,16 @@ import org.apache.distributedlog.metadata.DLMetadata;
 import org.apache.pulsar.client.admin.PulsarAdmin;
 import org.apache.pulsar.client.admin.PulsarAdminBuilder;
 import org.apache.pulsar.client.api.ClientBuilder;
+import org.apache.pulsar.client.api.CompressionType;
+import org.apache.pulsar.client.api.MessageId;
+import org.apache.pulsar.client.api.Producer;
+import org.apache.pulsar.client.api.ProducerAccessMode;
 import org.apache.pulsar.client.api.PulsarClient;
 import org.apache.pulsar.client.api.PulsarClientException;
+import org.apache.pulsar.client.api.Reader;
+import org.apache.pulsar.client.api.ReaderBuilder;
+import org.apache.pulsar.common.conf.InternalConfigurationData;
 import org.apache.pulsar.common.policies.data.FunctionStats;
-import org.apache.pulsar.functions.proto.Function;
 import org.apache.pulsar.functions.proto.InstanceCommunication;
 import org.apache.pulsar.functions.runtime.Runtime;
 import org.apache.pulsar.functions.runtime.RuntimeSpawner;
@@ -52,10 +60,9 @@ import java.net.URI;
 import java.nio.file.Files;
 import java.util.Map;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
-
-import static java.nio.file.StandardCopyOption.REPLACE_EXISTING;
-import static org.apache.commons.lang3.StringUtils.isNotBlank;
 
 @Slf4j
 public final class WorkerUtils {
@@ -63,8 +70,9 @@ public final class WorkerUtils {
     private WorkerUtils(){}
 
     public static void uploadFileToBookkeeper(String packagePath, File sourceFile, Namespace dlogNamespace) throws IOException {
-        FileInputStream uploadedInputStream = new FileInputStream(sourceFile);
-        uploadToBookeeper(dlogNamespace, uploadedInputStream, packagePath);
+        try (FileInputStream uploadedInputStream = new FileInputStream(sourceFile)) {
+            uploadToBookeeper(dlogNamespace, uploadedInputStream, packagePath);
+        }
     }
 
     public static void uploadToBookeeper(Namespace dlogNamespace,
@@ -75,13 +83,11 @@ public final class WorkerUtils {
         // if the dest directory does not exist, create it.
         if (dlogNamespace.logExists(destPkgPath)) {
             // if the destination file exists, write a log message
-            log.info(String.format("Target function file already exists at '%s'. Overwriting it now",
-                    destPkgPath));
+            log.info("Target function file already exists at '{}'. Overwriting it now", destPkgPath);
             dlogNamespace.deleteLog(destPkgPath);
         }
         // copy the topology package to target working directory
-        log.info(String.format("Uploading function package to '%s'",
-                destPkgPath));
+        log.info("Uploading function package to '{}'", destPkgPath);
 
         try (DistributedLogManager dlm = dlogNamespace.openLog(destPkgPath)) {
             try (AppendOnlyStreamWriter writer = dlm.getAppendOnlyStreamWriter()){
@@ -119,6 +125,11 @@ public final class WorkerUtils {
         }
     }
 
+    public static void deleteFromBookkeeper(Namespace namespace, String packagePath) throws IOException {
+        log.info("Deleting {} from BK", packagePath);
+        namespace.deleteLog(packagePath);
+    }
+
     public static DistributedLogConfiguration getDlogConf(WorkerConfig workerConfig) {
         int numReplicas = workerConfig.getNumFunctionPackageReplicas();
 
@@ -148,11 +159,27 @@ public final class WorkerUtils {
         return conf;
     }
 
-    public static URI initializeDlogNamespace(String zkServers, String ledgersRootPath) throws IOException {
-        BKDLConfig dlConfig = new BKDLConfig(zkServers, ledgersRootPath);
-        DLMetadata dlMetadata = DLMetadata.create(dlConfig);
-        URI dlogUri = URI.create(String.format("distributedlog://%s/pulsar/functions", zkServers));
+    public static URI newDlogNamespaceURI(String zookeeperServers) {
+        return URI.create(String.format("distributedlog://%s/pulsar/functions", zookeeperServers));
+    }
 
+    public static URI initializeDlogNamespace(InternalConfigurationData internalConf) throws IOException {
+        String zookeeperServers = internalConf.getZookeeperServers();
+        String ledgersRootPath;
+        String ledgersStoreServers;
+        // for BC purposes
+        if (internalConf.getBookkeeperMetadataServiceUri() == null) {
+            ledgersRootPath = internalConf.getLedgersRootPath();
+            ledgersStoreServers = zookeeperServers;
+        } else {
+            URI metadataServiceUri = URI.create(internalConf.getBookkeeperMetadataServiceUri());
+            ledgersStoreServers = metadataServiceUri.getAuthority().replace(";", ",");
+            ledgersRootPath = metadataServiceUri.getPath();
+        }
+        BKDLConfig dlConfig = new BKDLConfig(ledgersStoreServers, ledgersRootPath);
+        DLMetadata dlMetadata = DLMetadata.create(dlConfig);
+
+        URI dlogUri = newDlogNamespaceURI(internalConf.getZookeeperServers());
         try {
             dlMetadata.create(dlogUri);
         } catch (ZKException e) {
@@ -171,6 +198,11 @@ public final class WorkerUtils {
     public static PulsarAdmin getPulsarAdminClient(String pulsarWebServiceUrl, String authPlugin, String authParams,
                                                    String tlsTrustCertsFilePath, Boolean allowTlsInsecureConnection,
                                                    Boolean enableTlsHostnameVerificationEnable) {
+        log.info("Create Pulsar Admin to service url {}: "
+            + "authPlugin = {}, authParams = {}, "
+            + "tlsTrustCerts = {}, allowTlsInsecureConnector = {}, enableTlsHostnameVerification = {}",
+            pulsarWebServiceUrl, authPlugin, authParams,
+            tlsTrustCertsFilePath, allowTlsInsecureConnection, enableTlsHostnameVerificationEnable);
         try {
             PulsarAdminBuilder adminBuilder = PulsarAdmin.builder().serviceHttpUrl(pulsarWebServiceUrl);
             if (isNotBlank(authPlugin) && isNotBlank(authParams)) {
@@ -286,21 +318,52 @@ public final class WorkerUtils {
         }
     }
 
-    public static boolean isFunctionCodeBuiltin(Function.FunctionDetailsOrBuilder functionDetails) {
-        if (functionDetails.hasSource()) {
-            Function.SourceSpec sourceSpec = functionDetails.getSource();
-            if (!StringUtils.isEmpty(sourceSpec.getBuiltin())) {
-                return true;
-            }
+    public static Reader<byte[]> createReader(ReaderBuilder readerBuilder,
+                                              String readerName,
+                                              String topic,
+                                              MessageId startMessageId) throws PulsarClientException {
+        return readerBuilder
+                .subscriptionRolePrefix(readerName)
+                .readerName(readerName)
+                .topic(topic)
+                .readCompacted(true)
+                .startMessageId(startMessageId)
+                .create();
+    }
+
+    public static Producer<byte[]> createExclusiveProducerWithRetry(PulsarClient client,
+                                                                    String topic,
+                                                                    String producerName,
+                                                                    Supplier<Boolean> isLeader,
+                                                                    int sleepInBetweenMs) throws NotLeaderAnymore {
+        try {
+            int tries = 0;
+            do {
+                try {
+                    return client.newProducer().topic(topic)
+                            .accessMode(ProducerAccessMode.Exclusive)
+                            .enableBatching(false)
+                            .blockIfQueueFull(true)
+                            .compressionType(CompressionType.LZ4)
+                            .producerName(producerName)
+                            .createAsync().get(10, TimeUnit.SECONDS);
+                } catch (Exception e) {
+                    log.info("Encountered exception while at creating exclusive producer to topic {}", topic, e);
+                }
+                tries++;
+                if (tries % 6 == 0) {
+                    log.warn("Failed to acquire exclusive producer to topic {} after {} attempts.  Will retry if we are still the leader.", topic, tries);
+                }
+                Thread.sleep(sleepInBetweenMs);
+            } while (isLeader.get());
+        } catch (InterruptedException e) {
+            throw new RuntimeException("Failed to create exclusive producer on topic " + topic, e);
         }
 
-        if (functionDetails.hasSink()) {
-            Function.SinkSpec sinkSpec = functionDetails.getSink();
-            if (!StringUtils.isEmpty(sinkSpec.getBuiltin())) {
-                return true;
-            }
-        }
+        throw new NotLeaderAnymore();
+    }
 
-        return false;
+    public static class NotLeaderAnymore extends Exception {
+
     }
 }

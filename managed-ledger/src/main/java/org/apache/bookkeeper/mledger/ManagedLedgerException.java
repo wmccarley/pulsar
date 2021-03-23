@@ -18,10 +18,12 @@
  */
 package org.apache.bookkeeper.mledger;
 
-import com.google.common.annotations.Beta;
+import org.apache.bookkeeper.common.annotation.InterfaceAudience;
+import org.apache.bookkeeper.common.annotation.InterfaceStability;
 
-@Beta
-@SuppressWarnings({"serial", "checkstyle:javadoctype"})
+@InterfaceAudience.LimitedPrivate
+@InterfaceStability.Stable
+@SuppressWarnings({ "serial", "checkstyle:javadoctype" })
 public class ManagedLedgerException extends Exception {
     public ManagedLedgerException(String msg) {
         super(msg);
@@ -29,6 +31,10 @@ public class ManagedLedgerException extends Exception {
 
     public ManagedLedgerException(Throwable e) {
         super(e);
+    }
+
+    public ManagedLedgerException(String msg, Throwable e) {
+        super(msg, e);
     }
 
     public static ManagedLedgerException getManagedLedgerException(Throwable e) {
@@ -39,8 +45,12 @@ public class ManagedLedgerException extends Exception {
     }
 
     public static class MetaStoreException extends ManagedLedgerException {
-        public MetaStoreException(Exception e) {
-            super(e);
+        public MetaStoreException(Throwable t) {
+            super(t);
+        }
+
+        public MetaStoreException(String msg) {
+            super(msg);
         }
     }
 
@@ -48,11 +58,19 @@ public class ManagedLedgerException extends Exception {
         public BadVersionException(Exception e) {
             super(e);
         }
+
+        public BadVersionException(String msg) {
+            super(msg);
+        }
     }
 
     public static class MetadataNotFoundException extends MetaStoreException {
         public MetadataNotFoundException(Exception e) {
             super(e);
+        }
+
+        public MetadataNotFoundException(String msg) {
+            super(msg);
         }
     }
 
@@ -70,6 +88,10 @@ public class ManagedLedgerException extends Exception {
     public static class ManagedLedgerNotFoundException extends ManagedLedgerException {
         public ManagedLedgerNotFoundException(Exception e) {
             super(e);
+        }
+
+        public ManagedLedgerNotFoundException(String message) {
+            super(message);
         }
     }
 
@@ -129,6 +151,18 @@ public class ManagedLedgerException extends Exception {
 
     public static class OffloadInProgressException extends ManagedLedgerException {
         public OffloadInProgressException(String msg) {
+            super(msg);
+        }
+    }
+
+    public static class CursorNotFoundException extends ManagedLedgerException {
+        public CursorNotFoundException(String msg) {
+            super(msg);
+        }
+    }
+
+    public static class ManagedLedgerInterceptException extends ManagedLedgerException {
+        public ManagedLedgerInterceptException(String msg) {
             super(msg);
         }
     }

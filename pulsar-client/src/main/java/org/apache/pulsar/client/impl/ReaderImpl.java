@@ -21,34 +21,45 @@ package org.apache.pulsar.client.impl;
 import java.io.IOException;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
+
 import org.apache.commons.codec.digest.DigestUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.pulsar.client.api.*;
-import org.apache.pulsar.client.impl.ConsumerImpl.SubscriptionMode;
 import org.apache.pulsar.client.impl.conf.ConsumerConfigurationData;
 import org.apache.pulsar.client.impl.conf.ReaderConfigurationData;
+import org.apache.pulsar.client.util.ExecutorProvider;
 import org.apache.pulsar.common.naming.TopicName;
 
 public class ReaderImpl<T> implements Reader<T> {
-
+    private static final BatchReceivePolicy DISABLED_BATCH_RECEIVE_POLICY = BatchReceivePolicy.builder()
+            .timeout(0, TimeUnit.MILLISECONDS)
+            .maxNumMessages(1)
+            .build();
     private final ConsumerImpl<T> consumer;
 
     public ReaderImpl(PulsarClientImpl client, ReaderConfigurationData<T> readerConfiguration,
-                      ExecutorService listenerExecutor, CompletableFuture<Consumer<T>> consumerFuture, Schema<T> schema) {
+                      ExecutorProvider executorProvider, CompletableFuture<Consumer<T>> consumerFuture, Schema<T> schema) {
 
         String subscription = "reader-" + DigestUtils.sha1Hex(UUID.randomUUID().toString()).substring(0, 10);
         if (StringUtils.isNotBlank(readerConfiguration.getSubscriptionRolePrefix())) {
             subscription = readerConfiguration.getSubscriptionRolePrefix() + "-" + subscription;
+        }
+        if (StringUtils.isNotBlank(readerConfiguration.getSubscriptionName())) {
+            subscription = readerConfiguration.getSubscriptionName();
         }
 
         ConsumerConfigurationData<T> consumerConfiguration = new ConsumerConfigurationData<>();
         consumerConfiguration.getTopicNames().add(readerConfiguration.getTopicName());
         consumerConfiguration.setSubscriptionName(subscription);
         consumerConfiguration.setSubscriptionType(SubscriptionType.Exclusive);
+        consumerConfiguration.setSubscriptionMode(SubscriptionMode.NonDurable);
         consumerConfiguration.setReceiverQueueSize(readerConfiguration.getReceiverQueueSize());
         consumerConfiguration.setReadCompacted(readerConfiguration.isReadCompacted());
+
+        // Reader doesn't need any batch receiving behaviours
+        // disable the batch receive timer for the ConsumerImpl instance wrapped by the ReaderImpl
+        consumerConfiguration.setBatchReceivePolicy(DISABLED_BATCH_RECEIVE_POLICY);
 
         if (readerConfiguration.getReaderName() != null) {
             consumerConfiguration.setConsumerName(readerConfiguration.getReaderName());
@@ -81,9 +92,17 @@ public class ReaderImpl<T> implements Reader<T> {
             consumerConfiguration.setCryptoKeyReader(readerConfiguration.getCryptoKeyReader());
         }
 
+        if (readerConfiguration.getKeyHashRanges() != null) {
+            consumerConfiguration.setKeySharedPolicy(
+                KeySharedPolicy
+                    .stickyHashRange()
+                    .ranges(readerConfiguration.getKeyHashRanges())
+            );
+        }
+
         final int partitionIdx = TopicName.getPartitionIndex(readerConfiguration.getTopicName());
         consumer = new ConsumerImpl<>(client, readerConfiguration.getTopicName(), consumerConfiguration,
-                listenerExecutor, partitionIdx, false, consumerFuture, SubscriptionMode.NonDurable,
+                executorProvider, partitionIdx, false, consumerFuture,
                 readerConfiguration.getStartMessageId(), readerConfiguration.getStartMessageFromRollbackDurationInSec(),
                 schema, null, true /* createTopicIfDoesNotExist */);
     }
@@ -124,10 +143,13 @@ public class ReaderImpl<T> implements Reader<T> {
 
     @Override
     public CompletableFuture<Message<T>> readNextAsync() {
-        return consumer.receiveAsync().thenApply(msg -> {
-            consumer.acknowledgeCumulativeAsync(msg);
-            return msg;
+        CompletableFuture<Message<T>> receiveFuture = consumer.receiveAsync();
+        receiveFuture.whenComplete((msg, t) -> {
+           if (msg != null) {
+               consumer.acknowledgeCumulativeAsync(msg);
+           }
         });
+        return receiveFuture;
     }
 
     @Override

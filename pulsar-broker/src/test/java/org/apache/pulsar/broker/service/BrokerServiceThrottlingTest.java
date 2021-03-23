@@ -23,10 +23,13 @@ import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertNotEquals;
 import static org.testng.Assert.fail;
 
-import java.net.URI;
+import com.google.common.collect.Lists;
+import com.google.common.collect.Maps;
+
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -37,7 +40,6 @@ import org.apache.pulsar.client.api.Consumer;
 import org.apache.pulsar.client.api.PulsarClient;
 import org.apache.pulsar.client.api.PulsarClientException;
 import org.apache.pulsar.client.api.SubscriptionType;
-import org.apache.pulsar.client.impl.ConsumerImpl;
 import org.apache.pulsar.common.util.ObjectMapperFactory;
 import org.apache.zookeeper.CreateMode;
 import org.apache.zookeeper.ZooDefs;
@@ -45,11 +47,7 @@ import org.testng.annotations.AfterMethod;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
-import com.google.common.collect.Lists;
-import com.google.common.collect.Maps;
-
-/**
- */
+@Test(groups = "broker")
 public class BrokerServiceThrottlingTest extends BrokerTestBase {
 
     @BeforeMethod
@@ -58,14 +56,14 @@ public class BrokerServiceThrottlingTest extends BrokerTestBase {
         super.baseSetup();
     }
 
-    @AfterMethod
+    @AfterMethod(alwaysRun = true)
     @Override
     protected void cleanup() throws Exception {
         super.internalCleanup();
     }
 
     /**
-     * Verifies: updating zk-thottling node reflects broker-maxConcurrentLookupRequest and updates semaphore.
+     * Verifies: updating zk-throttling node reflects broker-maxConcurrentLookupRequest and updates semaphore.
      *
      * @throws Exception
      */
@@ -89,8 +87,9 @@ public class BrokerServiceThrottlingTest extends BrokerTestBase {
 
         final String topicName = "persistent://prop/ns-abc/newTopic";
 
-        String lookupUrl = new URI("pulsar://localhost:" + BROKER_PORT).toString();
-        PulsarClient pulsarClient = PulsarClient.builder().serviceUrl(lookupUrl).statsInterval(0, TimeUnit.SECONDS)
+        PulsarClient pulsarClient = PulsarClient.builder()
+                .serviceUrl(pulsar.getBrokerServiceUrl())
+                .statsInterval(0, TimeUnit.SECONDS)
                 .build();
 
         Consumer<byte[]> consumer = pulsarClient.newConsumer().topic(topicName).subscriptionName("mysub").subscribe();
@@ -130,8 +129,9 @@ public class BrokerServiceThrottlingTest extends BrokerTestBase {
     public void testLookupThrottlingForClientByBroker() throws Exception {
         final String topicName = "persistent://prop/ns-abc/newTopic";
 
-        String lookupUrl = new URI("pulsar://localhost:" + BROKER_PORT).toString();
-        PulsarClient pulsarClient = PulsarClient.builder().serviceUrl(lookupUrl).statsInterval(0, TimeUnit.SECONDS)
+        PulsarClient pulsarClient = PulsarClient.builder()
+                .serviceUrl(pulsar.getBrokerServiceUrl())
+                .statsInterval(0, TimeUnit.SECONDS)
                 .ioThreads(20).connectionsPerBroker(20).build();
 
         int newPermits = 1;
@@ -174,6 +174,7 @@ public class BrokerServiceThrottlingTest extends BrokerTestBase {
         assertNotEquals(successfulConsumers.size(), totalConsumers);
     }
 
+
     /**
      * This testcase make sure that once consumer lost connection with broker, it always reconnects with broker by
      * retrying on throttling-error exception also.
@@ -189,11 +190,11 @@ public class BrokerServiceThrottlingTest extends BrokerTestBase {
      */
     @Test
     public void testLookupThrottlingForClientByBrokerInternalRetry() throws Exception {
+        final String topicName = "persistent://prop/ns-abc/newTopic-" + UUID.randomUUID().toString();
 
-        final String topicName = "persistent://prop/ns-abc/newTopic";
-
-        String lookupUrl = new URI("pulsar://localhost:" + BROKER_PORT).toString();
-        PulsarClient pulsarClient = PulsarClient.builder().serviceUrl(lookupUrl).statsInterval(0, TimeUnit.SECONDS)
+        PulsarClient pulsarClient = PulsarClient.builder()
+                .serviceUrl(pulsar.getBrokerServiceUrl())
+                .statsInterval(0, TimeUnit.SECONDS)
                 .ioThreads(20).connectionsPerBroker(20).build();
         upsertLookupPermits(100);
         List<Consumer<byte[]>> consumers = Collections.synchronizedList(Lists.newArrayList());
@@ -215,19 +216,18 @@ public class BrokerServiceThrottlingTest extends BrokerTestBase {
         }
         latch.await();
 
-        stopBroker();
-        conf.setMaxConcurrentLookupRequest(1);
-        startBroker();
+        admin.brokers().updateDynamicConfiguration("maxConcurrentLookupRequest", "1");
+        admin.topics().unload(topicName);
 
         // wait strategically for all consumers to reconnect
         retryStrategically((test) -> areAllConsumersConnected(consumers), 5, 500);
 
         int totalConnectedConsumers = 0;
-        for (int i = 0; i < consumers.size(); i++) {
-            if (((ConsumerImpl<?>) consumers.get(i)).isConnected()) {
+        for (Consumer<byte[]> consumer : consumers) {
+            if (consumer.isConnected()) {
                 totalConnectedConsumers++;
             }
-            consumers.get(i).close();
+            consumer.close();
 
         }
         assertEquals(totalConnectedConsumers, totalConsumers);
@@ -237,8 +237,8 @@ public class BrokerServiceThrottlingTest extends BrokerTestBase {
     }
 
     private boolean areAllConsumersConnected(List<Consumer<byte[]>> consumers) {
-        for (int i = 0; i < consumers.size(); i++) {
-            if (!((ConsumerImpl<?>) consumers.get(i)).isConnected()) {
+        for (Consumer<byte[]> consumer : consumers) {
+            if (!consumer.isConnected()) {
                 return false;
             }
         }
@@ -249,12 +249,11 @@ public class BrokerServiceThrottlingTest extends BrokerTestBase {
         Map<String, String> throttlingMap = Maps.newHashMap();
         throttlingMap.put("maxConcurrentLookupRequest", Integer.toString(permits));
         byte[] content = ObjectMapperFactory.getThreadLocal().writeValueAsBytes(throttlingMap);
-        if (mockZookKeeper.exists(BROKER_SERVICE_CONFIGURATION_PATH, false) != null) {
-            mockZookKeeper.setData(BROKER_SERVICE_CONFIGURATION_PATH, content, -1);
+        if (mockZooKeeper.exists(BROKER_SERVICE_CONFIGURATION_PATH, false) != null) {
+            mockZooKeeper.setData(BROKER_SERVICE_CONFIGURATION_PATH, content, -1);
         } else {
-            ZkUtils.createFullPathOptimistic(mockZookKeeper, BROKER_SERVICE_CONFIGURATION_PATH, content,
+            ZkUtils.createFullPathOptimistic(mockZooKeeper, BROKER_SERVICE_CONFIGURATION_PATH, content,
                     ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
         }
     }
-
 }

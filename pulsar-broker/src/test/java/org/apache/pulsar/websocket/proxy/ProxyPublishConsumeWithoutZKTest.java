@@ -19,6 +19,8 @@
 package org.apache.pulsar.websocket.proxy;
 
 import static java.util.concurrent.Executors.newFixedThreadPool;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.spy;
 
@@ -28,8 +30,8 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
-import org.apache.bookkeeper.test.PortManager;
 import org.apache.pulsar.client.api.ProducerConsumerBase;
+import org.apache.pulsar.metadata.impl.ZKMetadataStore;
 import org.apache.pulsar.websocket.WebSocketService;
 import org.apache.pulsar.websocket.service.ProxyServer;
 import org.apache.pulsar.websocket.service.WebSocketProxyConfiguration;
@@ -44,9 +46,9 @@ import org.testng.annotations.AfterMethod;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
+@Test(groups = "websocket")
 public class ProxyPublishConsumeWithoutZKTest extends ProducerConsumerBase {
     protected String methodName;
-    private int port;
     private ProxyServer proxyServer;
     private WebSocketService service;
 
@@ -55,32 +57,35 @@ public class ProxyPublishConsumeWithoutZKTest extends ProducerConsumerBase {
         super.internalSetup();
         super.producerBaseSetup();
 
-        port = PortManager.nextFreePort();
         WebSocketProxyConfiguration config = new WebSocketProxyConfiguration();
-        config.setWebServicePort(Optional.of(port));
+        config.setWebServicePort(Optional.of(0));
         config.setClusterName("test");
         config.setServiceUrl(pulsar.getSafeWebServiceAddress());
         config.setServiceUrlTls(pulsar.getWebServiceAddressTls());
         service = spy(new WebSocketService(config));
-        doReturn(mockZooKeeperClientFactory).when(service).getZooKeeperClientFactory();
+        doReturn(new ZKMetadataStore(mockZooKeeper)).when(service).createMetadataStore(anyString(), anyInt());
         proxyServer = new ProxyServer(config);
         WebSocketServiceStarter.start(proxyServer, service);
         log.info("Proxy Server Started");
     }
 
-    @AfterMethod
+    @AfterMethod(alwaysRun = true)
     protected void cleanup() throws Exception {
         super.internalCleanup();
-        service.close();
-        proxyServer.stop();
+        if (service != null) {
+            service.close();
+        }
+        if (proxyServer != null) {
+            proxyServer.stop();
+        }
         log.info("Finished Cleaning Up Test setup");
     }
 
-    @Test(timeOut=30000)
+    @Test(timeOut = 30000)
     public void socketTest() throws Exception {
 
-        String consumerUri = "ws://localhost:" + port + "/ws/v2/consumer/persistent/my-property/my-ns/my-topic/my-sub";
-        String producerUri = "ws://localhost:" + port + "/ws/v2/producer/persistent/my-property/my-ns/my-topic/";
+        String consumerUri = "ws://localhost:" + proxyServer.getListenPortHTTP().get() + "/ws/v2/consumer/persistent/my-property/my-ns/my-topic/my-sub";
+        String producerUri = "ws://localhost:" + proxyServer.getListenPortHTTP().get() + "/ws/v2/producer/persistent/my-property/my-ns/my-topic/";
 
         URI consumeUri = URI.create(consumerUri);
         URI produceUri = URI.create(producerUri);

@@ -22,8 +22,11 @@ import com.google.common.collect.Lists;
 
 import io.netty.channel.EventLoopGroup;
 
+import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.URI;
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.List;
@@ -31,7 +34,8 @@ import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 
 import org.apache.commons.lang3.tuple.Pair;
-import org.apache.pulsar.common.api.proto.PulsarApi.CommandGetTopicsOfNamespace.Mode;
+import org.apache.pulsar.client.impl.schema.SchemaUtils;
+import org.apache.pulsar.common.api.proto.CommandGetTopicsOfNamespace.Mode;
 import org.apache.pulsar.client.api.PulsarClientException;
 import org.apache.pulsar.client.api.PulsarClientException.NotFoundException;
 import org.apache.pulsar.client.impl.conf.ClientConfigurationData;
@@ -40,15 +44,15 @@ import org.apache.pulsar.common.naming.NamespaceName;
 import org.apache.pulsar.common.naming.TopicName;
 import org.apache.pulsar.common.partition.PartitionedTopicMetadata;
 import org.apache.pulsar.common.protocol.schema.GetSchemaResponse;
+import org.apache.pulsar.common.protocol.schema.SchemaData;
 import org.apache.pulsar.common.schema.SchemaInfo;
 import org.apache.pulsar.common.protocol.schema.SchemaInfoUtil;
+import org.apache.pulsar.common.schema.SchemaType;
 import org.apache.pulsar.common.util.FutureUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import static com.yahoo.sketches.Util.bytesToLong;
-
-class HttpLookupService implements LookupService {
+public class HttpLookupService implements LookupService {
 
     private final HttpClient httpClient;
     private final boolean useTls;
@@ -58,8 +62,7 @@ class HttpLookupService implements LookupService {
 
     public HttpLookupService(ClientConfigurationData conf, EventLoopGroup eventLoopGroup)
             throws PulsarClientException {
-        this.httpClient = new HttpClient(conf.getServiceUrl(), conf.getAuthentication(),
-                eventLoopGroup, conf.isTlsAllowInsecureConnection(), conf.getTlsTrustCertsFilePath());
+        this.httpClient = new HttpClient(conf, eventLoopGroup);
         this.useTls = conf.isUseTls();
     }
 
@@ -102,12 +105,14 @@ class HttpLookupService implements LookupService {
         });
     }
 
+    @Override
     public CompletableFuture<PartitionedTopicMetadata> getPartitionedTopicMetadata(TopicName topicName) {
         String format = topicName.isV2() ? "admin/v2/%s/partitions" : "admin/%s/partitions";
         return httpClient.get(String.format(format, topicName.getLookupName()) + "?checkAllowAutoCreation=true",
                 PartitionedTopicMetadata.class);
     }
 
+    @Override
     public String getServiceUrl() {
     	return httpClient.getServiceUrl();
     }
@@ -131,7 +136,7 @@ class HttpLookupService implements LookupService {
                 });
                 future.complete(result);})
             .exceptionally(ex -> {
-                log.warn("Failed to getTopicsUnderNamespace namespace: {}.", namespace, ex.getMessage());
+                log.warn("Failed to getTopicsUnderNamespace namespace {} {}.", namespace, ex.getMessage());
                 future.completeExceptionally(ex);
                 return null;
             });
@@ -152,10 +157,24 @@ class HttpLookupService implements LookupService {
         if (version != null) {
             path = String.format("admin/v2/schemas/%s/schema/%s",
                     schemaName,
-                    bytesToLong(version));
+                    ByteBuffer.wrap(version).getLong());
         }
         httpClient.get(path, GetSchemaResponse.class).thenAccept(response -> {
-            future.complete(Optional.of(SchemaInfoUtil.newSchemaInfo(schemaName, response)));
+            if (response.getType() == SchemaType.KEY_VALUE) {
+                try {
+                    SchemaData data = SchemaData
+                            .builder()
+                            .data(SchemaUtils.convertKeyValueDataStringToSchemaInfoSchema(response.getData().getBytes(StandardCharsets.UTF_8)))
+                            .type(response.getType())
+                            .props(response.getProperties())
+                            .build();
+                    future.complete(Optional.of(SchemaInfoUtil.newSchemaInfo(schemaName, data)));
+                } catch (IOException err) {
+                    future.completeExceptionally(err);
+                }
+            } else {
+                future.complete(Optional.of(SchemaInfoUtil.newSchemaInfo(schemaName, response)));
+            }
         }).exceptionally(ex -> {
             if (ex.getCause() instanceof NotFoundException) {
                 future.complete(Optional.empty());

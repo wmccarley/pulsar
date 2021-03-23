@@ -63,6 +63,18 @@ typedef enum {
     initial_position_earliest
 } initial_position;
 
+typedef enum {
+    // This is the default option to fail consume until crypto succeeds
+    pulsar_ConsumerFail,
+    // Message is silently acknowledged and not delivered to the application
+    pulsar_ConsumerDiscard,
+    // Deliver the encrypted message to the application. It's the application's
+    // responsibility to decrypt the message. If message is also compressed,
+    // decompression will fail. If message contain batch messages, client will
+    // not be able to retrieve individual messages in the batch
+    pulsar_ConsumerConsume
+} pulsar_consumer_crypto_failure_action;
+
 /// Callback definition for MessageListener
 typedef void (*pulsar_message_listener)(pulsar_consumer_t *consumer, pulsar_message_t *msg, void *ctx);
 
@@ -195,8 +207,59 @@ PULSAR_PUBLIC void pulsar_configure_set_negative_ack_redelivery_delay_ms(
 PULSAR_PUBLIC long pulsar_configure_get_negative_ack_redelivery_delay_ms(
     pulsar_consumer_configuration_t *consumer_configuration);
 
+/**
+ * Set time window in milliseconds for grouping message ACK requests. An ACK request is not sent
+ * to broker until the time window reaches its end, or the number of grouped messages reaches
+ * limit. Default is 100 milliseconds. If it's set to a non-positive value, ACK requests will be
+ * directly sent to broker without grouping.
+ *
+ * @param consumer_configuration the consumer conf object
+ * @param ackGroupMillis time of ACK grouping window in milliseconds.
+ */
+PULSAR_PUBLIC void pulsar_configure_set_ack_grouping_time_ms(
+    pulsar_consumer_configuration_t *consumer_configuration, long ackGroupingMillis);
+
+/**
+ * Get grouping time window in milliseconds.
+ *
+ * @param consumer_configuration the consumer conf object
+ * @return grouping time window in milliseconds.
+ */
+PULSAR_PUBLIC long pulsar_configure_get_ack_grouping_time_ms(
+    pulsar_consumer_configuration_t *consumer_configuration);
+
+/**
+ * Set max number of grouped messages within one grouping time window. If it's set to a
+ * non-positive value, number of grouped messages is not limited. Default is 1000.
+ *
+ * @param consumer_configuration the consumer conf object
+ * @param maxGroupingSize max number of grouped messages with in one grouping time window.
+ */
+PULSAR_PUBLIC void pulsar_configure_set_ack_grouping_max_size(
+    pulsar_consumer_configuration_t *consumer_configuration, long maxGroupingSize);
+
+/**
+ * Get max number of grouped messages within one grouping time window.
+ *
+ * @param consumer_configuration the consumer conf object
+ * @return max number of grouped messages within one grouping time window.
+ */
+PULSAR_PUBLIC long pulsar_configure_get_ack_grouping_max_size(
+    pulsar_consumer_configuration_t *consumer_configuration);
+
 PULSAR_PUBLIC int pulsar_consumer_is_encryption_enabled(
     pulsar_consumer_configuration_t *consumer_configuration);
+
+PULSAR_PUBLIC void pulsar_consumer_configuration_set_default_crypto_key_reader(
+    pulsar_consumer_configuration_t *consumer_configuration, const char *public_key_path,
+    const char *private_key_path);
+
+PULSAR_PUBLIC pulsar_consumer_crypto_failure_action pulsar_consumer_configuration_get_crypto_failure_action(
+    pulsar_consumer_configuration_t *consumer_configuration);
+
+PULSAR_PUBLIC void pulsar_consumer_configuration_set_crypto_failure_action(
+    pulsar_consumer_configuration_t *consumer_configuration,
+    pulsar_consumer_crypto_failure_action cryptoFailureAction);
 
 PULSAR_PUBLIC int pulsar_consumer_is_read_compacted(pulsar_consumer_configuration_t *consumer_configuration);
 

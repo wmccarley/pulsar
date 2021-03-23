@@ -19,14 +19,13 @@
 package org.apache.pulsar.functions.runtime.kubernetes;
 
 import lombok.Data;
-import lombok.ToString;
 import lombok.experimental.Accessors;
 import org.apache.pulsar.common.configuration.FieldContext;
+import org.apache.pulsar.common.nar.NarClassLoader;
 
 import java.util.Map;
 
 @Data
-@ToString
 @Accessors(chain = true)
 public class KubernetesRuntimeFactoryConfig {
     @FieldContext(
@@ -40,9 +39,20 @@ public class KubernetesRuntimeFactoryConfig {
     )
     protected String jobNamespace;
     @FieldContext(
+            doc = "The Kubernetes pod name to run the function instances. It is set to"
+                + "`pf-<tenant>-<namespace>-<function_name>-<random_uuid(8)>` if this setting is left to be empty"
+        )
+    protected String jobName;
+    @FieldContext(
         doc = "The docker image used to run function instance. By default it is `apachepulsar/pulsar`"
     )
     protected String pulsarDockerImageName;
+
+    @FieldContext(
+            doc = "The function docker images used to run function instance according to different "
+                    + "configurations provided by users. By default it is `apachepulsar/pulsar`"
+    )
+    protected Map<String, String> functionDockerImages;
 
     @FieldContext(
             doc = "The image pull policy for image used to run function instance. By default it is `IfNotPresent`"
@@ -54,6 +64,12 @@ public class KubernetesRuntimeFactoryConfig {
                     + " customized image in `pulsarDockerImageName`, you need to set this setting accordingly"
     )
     protected String pulsarRootDir;
+    @FieldContext(
+            doc = "The config admin CLI allows users to customize the configuration of the admin cli tool, such as:"
+                    + " `/bin/pulsar-admin and /bin/pulsarctl`. By default it is `/bin/pulsar-admin`. If you want to use `pulsarctl` "
+                    + " you need to set this setting accordingly"
+    )
+    protected String configAdminCLI;
     @FieldContext(
         doc = "This setting only takes effects if `k8Uri` is set to null. If your function worker is"
             + " also running as a k8s pod, set this to `true` is let function worker to submit functions to"
@@ -135,4 +151,15 @@ public class KubernetesRuntimeFactoryConfig {
       doc = "The port inside the function pod on which prometheus metrics are exposed"
     )
     private Integer metricsPort = 9094;
+
+    @FieldContext(
+       doc = "The directory inside the function pod where nar packages will be extracted"
+    )
+    private String narExtractionDirectory = NarClassLoader.DEFAULT_NAR_EXTRACTION_DIR;
+
+    @FieldContext(
+            doc = "The classpath where function instance files stored"
+    )
+    private String functionInstanceClassPath = "";
+
 }

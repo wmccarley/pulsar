@@ -19,7 +19,6 @@
 package org.apache.pulsar.broker.service;
 
 import static com.google.common.base.Preconditions.checkArgument;
-
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
@@ -27,20 +26,22 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
-
 import org.apache.pulsar.broker.service.BrokerServiceException.ConsumerBusyException;
 import org.apache.pulsar.broker.service.BrokerServiceException.ServerMetadataException;
-import org.apache.pulsar.common.api.proto.PulsarApi.CommandSubscribe.SubType;
+import org.apache.pulsar.common.api.proto.CommandSubscribe.SubType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 public abstract class AbstractDispatcherSingleActiveConsumer extends AbstractBaseDispatcher {
 
     protected final String topicName;
-    protected static final AtomicReferenceFieldUpdater<AbstractDispatcherSingleActiveConsumer, Consumer> ACTIVE_CONSUMER_UPDATER =
-            AtomicReferenceFieldUpdater.newUpdater(AbstractDispatcherSingleActiveConsumer.class, Consumer.class, "activeConsumer");
+    protected static final AtomicReferenceFieldUpdater<AbstractDispatcherSingleActiveConsumer, Consumer>
+            ACTIVE_CONSUMER_UPDATER = AtomicReferenceFieldUpdater.newUpdater(
+            AbstractDispatcherSingleActiveConsumer.class, Consumer.class, "activeConsumer");
     private volatile Consumer activeConsumer = null;
     protected final CopyOnWriteArrayList<Consumer> consumers;
+    protected StickyKeyConsumerSelector stickyKeyConsumerSelector;
+    protected boolean isKeyHashRangeFiltered = false;
     protected CompletableFuture<Void> closeFuture = null;
     protected final int partitionIndex;
 
@@ -68,8 +69,6 @@ public abstract class AbstractDispatcherSingleActiveConsumer extends AbstractBas
     protected abstract void readMoreEntries(Consumer consumer);
 
     protected abstract void cancelPendingRead();
-
-    protected abstract boolean isConsumersExceededOnTopic();
 
     protected abstract boolean isConsumersExceededOnSubscription();
 
@@ -143,14 +142,21 @@ public abstract class AbstractDispatcherSingleActiveConsumer extends AbstractBas
             throw new ConsumerBusyException("Exclusive consumer is already connected");
         }
 
-        if (isConsumersExceededOnTopic()) {
-            log.warn("[{}] Attempting to add consumer to topic which reached max consumers limit", this.topicName);
-            throw new ConsumerBusyException("Topic reached max consumers limit");
+        if (subscriptionType == SubType.Failover && isConsumersExceededOnSubscription()) {
+            log.warn("[{}] Attempting to add consumer to subscription which reached max consumers limit",
+                    this.topicName);
+            throw new ConsumerBusyException("Subscription reached max consumers limit");
         }
 
-        if (subscriptionType == SubType.Failover && isConsumersExceededOnSubscription()) {
-            log.warn("[{}] Attempting to add consumer to subscription which reached max consumers limit", this.topicName);
-            throw new ConsumerBusyException("Subscription reached max consumers limit");
+        if (subscriptionType == SubType.Exclusive
+                && consumer.getKeySharedMeta() != null
+                && consumer.getKeySharedMeta().getHashRangesList() != null
+                && consumer.getKeySharedMeta().getHashRangesList().size() > 0) {
+            stickyKeyConsumerSelector = new HashRangeExclusiveStickyKeyConsumerSelector();
+            stickyKeyConsumerSelector.addConsumer(consumer);
+            isKeyHashRangeFiltered = true;
+        } else {
+            isKeyHashRangeFiltered = false;
         }
 
         consumers.add(consumer);
@@ -229,6 +235,15 @@ public abstract class AbstractDispatcherSingleActiveConsumer extends AbstractBas
             // no consumer connected, complete disconnect immediately
             closeFuture.complete(null);
         }
+        return closeFuture;
+    }
+
+    public synchronized CompletableFuture<Void> disconnectActiveConsumers(boolean isResetCursor) {
+        closeFuture = new CompletableFuture<>();
+        if (activeConsumer != null) {
+            activeConsumer.disconnect(isResetCursor);
+        }
+        closeFuture.complete(null);
         return closeFuture;
     }
 

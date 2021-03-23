@@ -32,7 +32,6 @@ import java.io.Closeable;
 import java.util.ArrayDeque;
 import java.util.HashSet;
 import java.util.Iterator;
-import java.util.LinkedList;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
@@ -131,6 +130,7 @@ public class UnAckedMessageTracker implements Closeable {
                     if (!headPartition.isEmpty()) {
                         log.warn("[{}] {} messages have timed-out", consumerBase, headPartition.size());
                         headPartition.forEach(messageId -> {
+                            addChunkedMessageIdsAndRemoveFromSequnceMap(messageId, messageIds, consumerBase);
                             messageIds.add(messageId);
                             messageIdPartitionMap.remove(messageId);
                         });
@@ -139,15 +139,31 @@ public class UnAckedMessageTracker implements Closeable {
                     headPartition.clear();
                     timePartitions.addLast(headPartition);
                 } finally {
-                    writeLock.unlock();
+                    try {
+                        if (messageIds.size() > 0) {
+                            consumerBase.onAckTimeoutSend(messageIds);
+                            consumerBase.redeliverUnacknowledgedMessages(messageIds);
+                        }
+                        timeout = client.timer().newTimeout(this, tickDurationInMs, TimeUnit.MILLISECONDS);
+                    } finally {
+                        writeLock.unlock();
+                    }
                 }
-                if (messageIds.size() > 0) {
-                    consumerBase.onAckTimeoutSend(messageIds);
-                    consumerBase.redeliverUnacknowledgedMessages(messageIds);
-                }
-                timeout = client.timer().newTimeout(this, tickDurationInMs, TimeUnit.MILLISECONDS);
             }
         }, this.tickDurationInMs, TimeUnit.MILLISECONDS);
+    }
+
+    public static void addChunkedMessageIdsAndRemoveFromSequnceMap(MessageId messageId, Set<MessageId> messageIds,
+            ConsumerBase<?> consumerBase) {
+        if (messageId instanceof MessageIdImpl) {
+            MessageIdImpl[] chunkedMsgIds = consumerBase.unAckedChunkedMessageIdSequenceMap.get((MessageIdImpl) messageId);
+            if (chunkedMsgIds != null && chunkedMsgIds.length > 0) {
+                for (MessageIdImpl msgId : chunkedMsgIds) {
+                    messageIds.add(msgId);
+                }
+            }
+            consumerBase.unAckedChunkedMessageIdSequenceMap.remove((MessageIdImpl) messageId);
+        }
     }
 
     public void clear() {

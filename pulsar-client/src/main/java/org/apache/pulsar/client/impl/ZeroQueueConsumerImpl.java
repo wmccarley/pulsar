@@ -23,8 +23,8 @@ import static java.lang.String.format;
 
 import io.netty.buffer.ByteBuf;
 
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutorService;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -36,8 +36,9 @@ import org.apache.pulsar.client.api.MessageId;
 import org.apache.pulsar.client.api.PulsarClientException;
 import org.apache.pulsar.client.api.Schema;
 import org.apache.pulsar.client.impl.conf.ConsumerConfigurationData;
-import org.apache.pulsar.common.api.proto.PulsarApi.MessageIdData;
-import org.apache.pulsar.common.api.proto.PulsarApi.MessageMetadata;
+import org.apache.pulsar.client.util.ExecutorProvider;
+import org.apache.pulsar.common.api.proto.MessageIdData;
+import org.apache.pulsar.common.api.proto.MessageMetadata;
 
 @Slf4j
 public class ZeroQueueConsumerImpl<T> extends ConsumerImpl<T> {
@@ -45,14 +46,15 @@ public class ZeroQueueConsumerImpl<T> extends ConsumerImpl<T> {
     private final Lock zeroQueueLock = new ReentrantLock();
 
     private volatile boolean waitingOnReceiveForZeroQueueSize = false;
+    private volatile boolean waitingOnListenerForZeroQueueSize = false;
 
     public ZeroQueueConsumerImpl(PulsarClientImpl client, String topic, ConsumerConfigurationData<T> conf,
-            ExecutorService listenerExecutor, int partitionIndex, boolean hasParentConsumer, CompletableFuture<Consumer<T>> subscribeFuture,
-            SubscriptionMode subscriptionMode, MessageId startMessageId, Schema<T> schema,
-            ConsumerInterceptors<T> interceptors,
-            boolean createTopicIfDoesNotExist) {
-        super(client, topic, conf, listenerExecutor, partitionIndex, hasParentConsumer, subscribeFuture,
-                subscriptionMode, startMessageId, 0 /* startMessageRollbackDurationInSec */, schema, interceptors,
+             ExecutorProvider executorProvider, int partitionIndex, boolean hasParentConsumer,
+             CompletableFuture<Consumer<T>> subscribeFuture, MessageId startMessageId, Schema<T> schema,
+             ConsumerInterceptors<T> interceptors,
+             boolean createTopicIfDoesNotExist) {
+        super(client, topic, conf, executorProvider, partitionIndex, hasParentConsumer, subscribeFuture,
+                startMessageId, 0 /* startMessageRollbackDurationInSec */, schema, interceptors,
                 createTopicIfDoesNotExist);
     }
 
@@ -60,7 +62,9 @@ public class ZeroQueueConsumerImpl<T> extends ConsumerImpl<T> {
     protected Message<T> internalReceive() throws PulsarClientException {
         zeroQueueLock.lock();
         try {
-            return beforeConsume(fetchSingleMessageFromBroker());
+            Message<T> msg = fetchSingleMessageFromBroker();
+            trackMessage(msg);
+            return beforeConsume(msg);
         } finally {
             zeroQueueLock.unlock();
         }
@@ -71,7 +75,7 @@ public class ZeroQueueConsumerImpl<T> extends ConsumerImpl<T> {
         CompletableFuture<Message<T>> future = super.internalReceiveAsync();
         if (!future.isDone()) {
             // We expect the message to be not in the queue yet
-            sendFlowPermitsToBroker(cnx(), 1);
+            increaseAvailablePermits(cnx());
         }
 
         return future;
@@ -90,12 +94,12 @@ public class ZeroQueueConsumerImpl<T> extends ConsumerImpl<T> {
             waitingOnReceiveForZeroQueueSize = true;
             synchronized (this) {
                 if (isConnected()) {
-                    sendFlowPermitsToBroker(cnx(), 1);
+                    increaseAvailablePermits(cnx());
                 }
             }
             do {
                 message = incomingMessages.take();
-                lastDequeuedMessage = message.getMessageId();
+                lastDequeuedMessageId = message.getMessageId();
                 ClientCnx msgCnx = ((MessageImpl<?>) message).getCnx();
                 // synchronized need to prevent race between connectionOpened and the check "msgCnx == cnx()"
                 synchronized (this) {
@@ -129,8 +133,8 @@ public class ZeroQueueConsumerImpl<T> extends ConsumerImpl<T> {
         // or queue was not empty: send a flow command
         if (waitingOnReceiveForZeroQueueSize
                 || currentQueueSize > 0
-                || listener != null) {
-            sendFlowPermitsToBroker(cnx, 1);
+                || (listener != null && !waitingOnListenerForZeroQueueSize)) {
+            increaseAvailablePermits(cnx);
         }
     }
 
@@ -148,29 +152,33 @@ public class ZeroQueueConsumerImpl<T> extends ConsumerImpl<T> {
         checkNotNull(listener, "listener can't be null");
         checkNotNull(message, "unqueued message can't be null");
 
-        listenerExecutor.execute(() -> {
+        pinnedExecutor.execute(() -> {
             stats.updateNumMsgsReceived(message);
             try {
                 if (log.isDebugEnabled()) {
                     log.debug("[{}][{}] Calling message listener for unqueued message {}", topic, subscription,
                             message.getMessageId());
                 }
+                waitingOnListenerForZeroQueueSize = true;
+                trackMessage(message);
                 listener.received(ZeroQueueConsumerImpl.this, beforeConsume(message));
             } catch (Throwable t) {
                 log.error("[{}][{}] Message listener error in processing unqueued message: {}", topic, subscription,
                         message.getMessageId(), t);
             }
             increaseAvailablePermits(cnx());
+            waitingOnListenerForZeroQueueSize = false;
         });
     }
 
     @Override
-    protected void triggerListener(int numMessages) {
+    protected void triggerListener() {
         // Ignore since it was already triggered in the triggerZeroQueueSizeListener() call
     }
 
     @Override
     void receiveIndividualMessagesFromBatch(MessageMetadata msgMetadata, int redeliveryCount,
+            List<Long> ackSet,
             ByteBuf uncompressedPayload, MessageIdData messageId, ClientCnx cnx) {
         log.warn(
                 "Closing consumer [{}]-[{}] due to unsupported received batch-message with zero receiver queue size",

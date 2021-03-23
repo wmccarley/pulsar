@@ -19,18 +19,15 @@
 package org.apache.pulsar.broker.service.persistent;
 
 import static com.google.common.base.Preconditions.checkArgument;
-
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
-
 import org.apache.bookkeeper.mledger.AsyncCallbacks.MarkDeleteCallback;
 import org.apache.bookkeeper.mledger.ManagedCursor;
 import org.apache.bookkeeper.mledger.ManagedLedgerException;
 import org.apache.bookkeeper.mledger.Position;
-import org.apache.bookkeeper.mledger.impl.PositionImpl;
 import org.apache.pulsar.broker.service.Consumer;
-import org.apache.pulsar.common.api.proto.PulsarApi.CommandAck.AckType;
+import org.apache.pulsar.common.api.proto.CommandAck.AckType;
 import org.apache.pulsar.compaction.CompactedTopic;
 import org.apache.pulsar.compaction.Compactor;
 import org.slf4j.Logger;
@@ -57,7 +54,7 @@ public class CompactorSubscription extends PersistentSubscription {
     }
 
     @Override
-    public void acknowledgeMessage(List<Position> positions, AckType ackType, Map<String,Long> properties) {
+    public void acknowledgeMessage(List<Position> positions, AckType ackType, Map<String, Long> properties) {
         checkArgument(ackType == AckType.Cumulative);
         checkArgument(positions.size() == 1);
         checkArgument(properties.containsKey(Compactor.COMPACTED_TOPIC_LEDGER_PROPERTY));
@@ -89,7 +86,7 @@ public class CompactorSubscription extends PersistentSubscription {
                 }
             }, null);
 
-        if (topic.getManagedLedger().isTerminated() && cursor.getNumberOfEntriesInBacklog() == 0) {
+        if (topic.getManagedLedger().isTerminated() && cursor.getNumberOfEntriesInBacklog(false) == 0) {
             // Notify all consumer that the end of topic was reached
             dispatcher.getConsumers().forEach(Consumer::reachedEndOfTopic);
         }

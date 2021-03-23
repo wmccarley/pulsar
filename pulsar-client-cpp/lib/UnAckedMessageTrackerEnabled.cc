@@ -28,7 +28,7 @@ void UnAckedMessageTrackerEnabled::timeoutHandler() {
     timeoutHandlerHelper();
     ExecutorServicePtr executorService = client_->getIOExecutorProvider()->get();
     timer_ = executorService->createDeadlineTimer();
-    timer_->expires_from_now(boost::posix_time::milliseconds(timeoutMs_));
+    timer_->expires_from_now(boost::posix_time::milliseconds(tickDurationInMs_));
     timer_->async_wait([&](const boost::system::error_code& ec) {
         if (ec) {
             LOG_DEBUG("Ignoring timer cancelled event, code[" << ec << "]");
@@ -39,60 +39,99 @@ void UnAckedMessageTrackerEnabled::timeoutHandler() {
 }
 
 void UnAckedMessageTrackerEnabled::timeoutHandlerHelper() {
-    std::lock_guard<std::mutex> acquire(lock_);
+    std::unique_lock<std::mutex> acquire(lock_);
     LOG_DEBUG("UnAckedMessageTrackerEnabled::timeoutHandlerHelper invoked for consumerPtr_ "
               << consumerReference_.getName().c_str());
-    if (!oldSet_.empty()) {
+
+    std::set<MessageId> headPartition = timePartitions.front();
+    timePartitions.pop_front();
+
+    std::set<MessageId> msgIdsToRedeliver;
+    if (!headPartition.empty()) {
         LOG_INFO(consumerReference_.getName().c_str()
-                 << ": " << oldSet_.size() << " Messages were not acked within " << timeoutMs_ << " time");
-        oldSet_.clear();
-        currentSet_.clear();
-        consumerReference_.redeliverUnacknowledgedMessages();
+                 << ": " << headPartition.size() << " Messages were not acked within "
+                 << timePartitions.size() * tickDurationInMs_ << " time");
+        for (auto it = headPartition.begin(); it != headPartition.end(); it++) {
+            msgIdsToRedeliver.insert(*it);
+            messageIdPartitionMap.erase(*it);
+        }
     }
-    oldSet_.swap(currentSet_);
+    headPartition.clear();
+    timePartitions.push_back(headPartition);
+
+    if (msgIdsToRedeliver.size() > 0) {
+        // redeliverUnacknowledgedMessages() may call clear() that acquire the lock again, so we should unlock
+        // here to avoid deadlock
+        acquire.unlock();
+        consumerReference_.redeliverUnacknowledgedMessages(msgIdsToRedeliver);
+    }
 }
 
 UnAckedMessageTrackerEnabled::UnAckedMessageTrackerEnabled(long timeoutMs, const ClientImplPtr client,
                                                            ConsumerImplBase& consumer)
     : consumerReference_(consumer) {
+    UnAckedMessageTrackerEnabled(timeoutMs, timeoutMs, client, consumer);
+}
+
+UnAckedMessageTrackerEnabled::UnAckedMessageTrackerEnabled(long timeoutMs, long tickDurationInMs,
+                                                           const ClientImplPtr client,
+                                                           ConsumerImplBase& consumer)
+    : consumerReference_(consumer) {
     timeoutMs_ = timeoutMs;
+    tickDurationInMs_ = (timeoutMs >= tickDurationInMs) ? tickDurationInMs : timeoutMs;
     client_ = client;
+
+    int blankPartitions = (int)std::ceil((double)timeoutMs_ / tickDurationInMs_);
+    for (int i = 0; i < blankPartitions + 1; i++) {
+        std::set<MessageId> msgIds;
+        timePartitions.push_back(msgIds);
+    }
+
     timeoutHandler();
 }
 
-bool UnAckedMessageTrackerEnabled::add(const MessageId& m) {
+bool UnAckedMessageTrackerEnabled::add(const MessageId& msgId) {
     std::lock_guard<std::mutex> acquire(lock_);
-    oldSet_.erase(m);
-    return currentSet_.insert(m).second;
+    MessageId id(msgId.partition(), msgId.ledgerId(), msgId.entryId(), -1);
+    if (messageIdPartitionMap.count(id) == 0) {
+        std::set<MessageId>& partition = timePartitions.back();
+        bool emplace = messageIdPartitionMap.emplace(id, partition).second;
+        bool insert = partition.insert(id).second;
+        return emplace && insert;
+    }
+    return false;
 }
 
 bool UnAckedMessageTrackerEnabled::isEmpty() {
     std::lock_guard<std::mutex> acquire(lock_);
-    return oldSet_.empty() && currentSet_.empty();
+    return messageIdPartitionMap.empty();
 }
 
-bool UnAckedMessageTrackerEnabled::remove(const MessageId& m) {
+bool UnAckedMessageTrackerEnabled::remove(const MessageId& msgId) {
     std::lock_guard<std::mutex> acquire(lock_);
-    return oldSet_.erase(m) || currentSet_.erase(m);
+    MessageId id(msgId.partition(), msgId.ledgerId(), msgId.entryId(), -1);
+    bool removed = false;
+
+    std::map<MessageId, std::set<MessageId>&>::iterator exist = messageIdPartitionMap.find(id);
+    if (exist != messageIdPartitionMap.end()) {
+        removed = exist->second.erase(id);
+        messageIdPartitionMap.erase(exist);
+    }
+    return removed;
 }
 
 long UnAckedMessageTrackerEnabled::size() {
     std::lock_guard<std::mutex> acquire(lock_);
-    return oldSet_.size() + currentSet_.size();
+    return messageIdPartitionMap.size();
 }
 
 void UnAckedMessageTrackerEnabled::removeMessagesTill(const MessageId& msgId) {
     std::lock_guard<std::mutex> acquire(lock_);
-    for (std::set<MessageId>::iterator it = oldSet_.begin(); it != oldSet_.end();) {
-        if (*it < msgId && it->partition() == msgId.partition()) {
-            oldSet_.erase(it++);
-        } else {
-            it++;
-        }
-    }
-    for (std::set<MessageId>::iterator it = currentSet_.begin(); it != currentSet_.end();) {
-        if (*it < msgId && it->partition() == msgId.partition()) {
-            currentSet_.erase(it++);
+    for (auto it = messageIdPartitionMap.begin(); it != messageIdPartitionMap.end();) {
+        MessageId msgIdInMap = it->first;
+        if (msgIdInMap <= msgId) {
+            it->second.erase(msgIdInMap);
+            messageIdPartitionMap.erase(it++);
         } else {
             it++;
         }
@@ -101,18 +140,12 @@ void UnAckedMessageTrackerEnabled::removeMessagesTill(const MessageId& msgId) {
 
 // this is only for MultiTopicsConsumerImpl, when un-subscribe a single topic, should remove all it's message.
 void UnAckedMessageTrackerEnabled::removeTopicMessage(const std::string& topic) {
-    for (std::set<MessageId>::iterator it = oldSet_.begin(); it != oldSet_.end();) {
-        const std::string& topicPartitionName = it->getTopicName();
-        if (topicPartitionName.find(topic) != std::string::npos) {
-            oldSet_.erase(it++);
-        } else {
-            it++;
-        }
-    }
-    for (std::set<MessageId>::iterator it = currentSet_.begin(); it != currentSet_.end();) {
-        const std::string& topicPartitionName = it->getTopicName();
-        if (topicPartitionName.find(topic) != std::string::npos) {
-            currentSet_.erase(it++);
+    std::lock_guard<std::mutex> acquire(lock_);
+    for (auto it = messageIdPartitionMap.begin(); it != messageIdPartitionMap.end();) {
+        MessageId msgIdInMap = it->first;
+        if (msgIdInMap.getTopicName().compare(topic) == 0) {
+            it->second.erase(msgIdInMap);
+            messageIdPartitionMap.erase(it++);
         } else {
             it++;
         }
@@ -120,8 +153,11 @@ void UnAckedMessageTrackerEnabled::removeTopicMessage(const std::string& topic) 
 }
 
 void UnAckedMessageTrackerEnabled::clear() {
-    currentSet_.clear();
-    oldSet_.clear();
+    std::lock_guard<std::mutex> acquire(lock_);
+    messageIdPartitionMap.clear();
+    for (auto it = timePartitions.begin(); it != timePartitions.end(); it++) {
+        it->clear();
+    }
 }
 
 UnAckedMessageTrackerEnabled::~UnAckedMessageTrackerEnabled() {

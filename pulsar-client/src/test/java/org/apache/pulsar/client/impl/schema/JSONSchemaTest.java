@@ -18,11 +18,18 @@
  */
 package org.apache.pulsar.client.impl.schema;
 
-import java.util.Collections;
-import java.util.List;
-
+import static org.apache.pulsar.client.impl.schema.SchemaTestUtils.FOO_FIELDS;
+import static org.apache.pulsar.client.impl.schema.SchemaTestUtils.SCHEMA_JSON_ALLOW_NULL;
+import static org.apache.pulsar.client.impl.schema.SchemaTestUtils.SCHEMA_JSON_NOT_ALLOW_NULL;
+import static org.testng.Assert.assertEquals;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufAllocator;
+import java.util.Collections;
+import java.util.List;
+import lombok.AllArgsConstructor;
+import lombok.Data;
+import lombok.NoArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.avro.Schema;
 import org.apache.pulsar.client.api.SchemaSerializationException;
@@ -33,24 +40,24 @@ import org.apache.pulsar.client.impl.schema.SchemaTestUtils.Foo;
 import org.apache.pulsar.client.impl.schema.SchemaTestUtils.NestedBar;
 import org.apache.pulsar.client.impl.schema.SchemaTestUtils.NestedBarList;
 import org.apache.pulsar.common.schema.SchemaType;
+import org.json.JSONException;
+import org.skyscreamer.jsonassert.JSONAssert;
 import org.testng.Assert;
 import org.testng.annotations.Test;
-
-import static org.apache.pulsar.client.impl.schema.SchemaTestUtils.FOO_FIELDS;
-import static org.apache.pulsar.client.impl.schema.SchemaTestUtils.SCHEMA_JSON_NOT_ALLOW_NULL;
-import static org.apache.pulsar.client.impl.schema.SchemaTestUtils.SCHEMA_JSON_ALLOW_NULL;
-import static org.testng.Assert.assertEquals;
 
 @Slf4j
 public class JSONSchemaTest {
 
+    public static void assertJSONEqual(String s1, String s2) throws JSONException{
+        JSONAssert.assertEquals(s1, s2, false);
+    }
     @Test
-    public void testNotAllowNullSchema() {
+    public void testNotAllowNullSchema() throws JSONException {
         JSONSchema<Foo> jsonSchema = JSONSchema.of(SchemaDefinition.<Foo>builder().withPojo(Foo.class).withAlwaysAllowNull(false).build());
         Assert.assertEquals(jsonSchema.getSchemaInfo().getType(), SchemaType.JSON);
         Schema.Parser parser = new Schema.Parser();
         String schemaJson = new String(jsonSchema.getSchemaInfo().getSchema());
-        Assert.assertEquals(schemaJson, SCHEMA_JSON_NOT_ALLOW_NULL);
+        assertJSONEqual(schemaJson, SCHEMA_JSON_NOT_ALLOW_NULL);
         Schema schema = parser.parse(schemaJson);
 
         for (String fieldName : FOO_FIELDS) {
@@ -67,12 +74,13 @@ public class JSONSchemaTest {
     }
 
     @Test
-    public void testAllowNullSchema() {
+    public void testAllowNullSchema() throws JSONException {
         JSONSchema<Foo> jsonSchema = JSONSchema.of(SchemaDefinition.<Foo>builder().withPojo(Foo.class).build());
         Assert.assertEquals(jsonSchema.getSchemaInfo().getType(), SchemaType.JSON);
         Schema.Parser parser = new Schema.Parser();
+        parser.setValidateDefaults(false);
         String schemaJson = new String(jsonSchema.getSchemaInfo().getSchema());
-        Assert.assertEquals(schemaJson, SCHEMA_JSON_ALLOW_NULL);
+        assertJSONEqual(schemaJson, SCHEMA_JSON_ALLOW_NULL);
         Schema schema = parser.parse(schemaJson);
 
         for (String fieldName : FOO_FIELDS) {
@@ -325,5 +333,39 @@ public class JSONSchemaTest {
         Assert.assertTrue(bytes1.length > 0);
         assertEquals(jsonSchema.decode(byteBuf), foo1);
 
+    }
+
+    @Data
+    @AllArgsConstructor
+    @NoArgsConstructor
+    private static class Seller {
+        public String state;
+        public String street;
+        public long zipCode;
+    }
+
+    @Data
+    @AllArgsConstructor
+    @NoArgsConstructor
+    private static class PC {
+        public String brand;
+        public String model;
+        public int year;
+        public GPU gpu;
+        public Seller seller;
+    }
+
+    private enum GPU {
+        AMD, NVIDIA
+    }
+
+    @Test
+    public void testEncodeAndDecodeObject() throws JsonProcessingException {
+        JSONSchema<PC> jsonSchema = JSONSchema.of(SchemaDefinition.<PC>builder().withPojo(PC.class).build());
+        PC pc = new PC("dell", "alienware", 2021, GPU.AMD,
+                new Seller("WA", "street", 98004));
+        byte[] encoded = jsonSchema.encode(pc);
+        PC roundtrippedPc = jsonSchema.decode(encoded);
+        assertEquals(roundtrippedPc, pc);
     }
 }

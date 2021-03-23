@@ -18,6 +18,8 @@
  */
 package org.apache.pulsar.client.cli;
 
+import static org.apache.commons.lang3.StringUtils.isNotBlank;
+
 import com.beust.jcommander.Parameter;
 import com.beust.jcommander.ParameterException;
 import com.beust.jcommander.Parameters;
@@ -30,6 +32,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.net.URI;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
@@ -38,18 +41,13 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 import org.apache.commons.io.HexDump;
 import org.apache.commons.lang3.StringUtils;
-import org.apache.pulsar.client.api.Authentication;
-import org.apache.pulsar.client.api.AuthenticationDataProvider;
-import org.apache.pulsar.client.api.ClientBuilder;
-import org.apache.pulsar.client.api.Consumer;
-import org.apache.pulsar.client.api.ConsumerBuilder;
-import org.apache.pulsar.client.api.Message;
-import org.apache.pulsar.client.api.PulsarClient;
-import org.apache.pulsar.client.api.PulsarClientException;
-import org.apache.pulsar.client.api.SubscriptionType;
+import org.apache.pulsar.client.api.*;
+import org.apache.pulsar.client.api.schema.Field;
+import org.apache.pulsar.client.api.schema.GenericRecord;
 import org.apache.pulsar.common.naming.TopicName;
 import org.apache.pulsar.common.util.collections.GrowableArrayBlockingQueue;
 import org.eclipse.jetty.util.ssl.SslContextFactory;
@@ -77,8 +75,14 @@ public class CmdConsume {
     @Parameter(description = "TopicName", required = true)
     private List<String> mainOptions = new ArrayList<String>();
 
-    @Parameter(names = { "-t", "--subscription-type" }, description = "Subscription type: Exclusive, Shared, Failover.")
+    @Parameter(names = { "-t", "--subscription-type" }, description = "Subscription type.")
     private SubscriptionType subscriptionType = SubscriptionType.Exclusive;
+
+    @Parameter(names = { "-m", "--subscription-mode" }, description = "Subscription mode.")
+    private SubscriptionMode subscriptionMode = SubscriptionMode.Durable;
+
+    @Parameter(names = { "-p", "--subscription-position" }, description = "Subscription position.")
+    private SubscriptionInitialPosition subscriptionInitialPosition = SubscriptionInitialPosition.Latest;
 
     @Parameter(names = { "-s", "--subscription-name" }, required = true, description = "Subscription name.")
     private String subscriptionName;
@@ -90,13 +94,35 @@ public class CmdConsume {
     @Parameter(names = { "--hex" }, description = "Display binary messages in hex.")
     private boolean displayHex = false;
 
+    @Parameter(names = { "--hide-content" }, description = "Do not write the message to console.")
+    private boolean hideContent = false;
+
     @Parameter(names = { "-r", "--rate" }, description = "Rate (in msg/sec) at which to consume, "
             + "value 0 means to consume messages as fast as possible.")
     private double consumeRate = 0;
 
-    @Parameter(names = { "--regex" }, description = "Indicate thetopic name is a regex pattern")
+    @Parameter(names = { "--regex" }, description = "Indicate the topic name is a regex pattern")
     private boolean isRegex = false;
+    
+    @Parameter(names = { "-q", "--queue-size" }, description = "Consumer receiver queue size.")
+    private int receiverQueueSize = 0;
 
+    @Parameter(names = { "-mc", "--max_chunked_msg" }, description = "Max pending chunk messages")
+    private int maxPendingChuckedMessage = 0;
+
+    @Parameter(names = { "-ac",
+            "--auto_ack_chunk_q_full" }, description = "Auto ack for oldest message on queue is full")
+    private boolean autoAckOldestChunkedMessageOnQueueFull = false;
+
+    @Parameter(names = { "-ekv",
+            "--encryption-key-value" }, description = "The URI of private key to decrypt payload, for example "
+                    + "file:///path/to/private.key or data:application/x-pem-file;base64,*****")
+    private String encKeyValue;
+
+    @Parameter(names = { "-st", "--schema-type"}, description = "Set a schema type on the consumer, it can be 'bytes' or 'auto_consume'")
+    private String schematype = "bytes";
+
+    
     private ClientBuilder clientBuilder;
     private Authentication authentication;
     private String serviceURL;
@@ -124,15 +150,58 @@ public class CmdConsume {
      *            Whether to display BytesMessages in hexdump style, ignored for simple text messages
      * @return String representation of the message
      */
-    private String interpretMessage(Message<byte[]> message, boolean displayHex) throws IOException {
-        byte[] msgData = message.getData();
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        if (!displayHex) {
-            return new String(msgData);
+    private String interpretMessage(Message<?> message, boolean displayHex) throws IOException {
+        StringBuilder sb = new StringBuilder();
+
+        String properties = Arrays.toString(message.getProperties().entrySet().toArray());
+
+        String data;
+        Object value = message.getValue();
+        if (value == null) {
+            data = "null";
+        } else if (value instanceof byte[]) {
+            byte[] msgData = (byte[]) value;
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            if (!displayHex) {
+                data = new String(msgData);
+            } else {
+                HexDump.dump(msgData, 0, out, 0);
+                data = new String(out.toByteArray());
+            }
+        } else if (value instanceof GenericRecord) {
+            Map<String, Object> asMap = genericRecordToMap((GenericRecord) value);
+            data = asMap.toString();
         } else {
-            HexDump.dump(msgData, 0, out, 0);
-            return new String(out.toByteArray());
+            data = value.toString();
         }
+
+        String key = null;
+        if (message.hasKey()) {
+            key = message.getKey();
+        }
+
+        sb.append("key:[").append(key).append("], ");
+        if (!properties.isEmpty()) {
+            sb.append("properties:").append(properties).append(", ");
+        }
+        sb.append("content:").append(data);
+
+        return sb.toString();
+    }
+
+    private static Map<String, Object> genericRecordToMap(GenericRecord value) {
+        return value.getFields()
+                .stream()
+                .collect(Collectors.toMap(Field::getName, f -> {
+                    Object fieldValue = value.getField(f);
+                    if (fieldValue instanceof GenericRecord) {
+                        return genericRecordToMap((GenericRecord) fieldValue);
+                    } else if (fieldValue == null) {
+                        return "null";
+                    } else {
+                        return fieldValue;
+                    }
+                }));
     }
 
     /**
@@ -162,10 +231,19 @@ public class CmdConsume {
         int returnCode = 0;
 
         try {
+            ConsumerBuilder<?> builder;
             PulsarClient client = clientBuilder.build();
-            ConsumerBuilder<byte[]> builder = client.newConsumer()
+            Schema<?> schema = Schema.BYTES;
+            if ("auto_consume".equals(schematype)) {
+                schema = Schema.AUTO_CONSUME();
+            } else if (!"bytes".equals(schematype)) {
+                throw new IllegalArgumentException("schema type must be 'bytes' or 'auto_consume");
+            }
+            builder = client.newConsumer(schema)
                     .subscriptionName(this.subscriptionName)
-                    .subscriptionType(subscriptionType);
+                    .subscriptionType(subscriptionType)
+                    .subscriptionMode(subscriptionMode)
+                    .subscriptionInitialPosition(subscriptionInitialPosition);
 
             if (isRegex) {
                 builder.topicsPattern(Pattern.compile(topic));
@@ -173,22 +251,38 @@ public class CmdConsume {
                 builder.topic(topic);
             }
 
-            Consumer<byte[]> consumer = builder.subscribe();
+            if (this.maxPendingChuckedMessage > 0) {
+                builder.maxPendingChuckedMessage(this.maxPendingChuckedMessage);
+            }
+            if (this.receiverQueueSize > 0) {
+                builder.receiverQueueSize(this.receiverQueueSize);
+            }
 
+            builder.autoAckOldestChunkedMessageOnQueueFull(this.autoAckOldestChunkedMessageOnQueueFull);
+
+            if (isNotBlank(this.encKeyValue)) {
+                builder.defaultCryptoKeyReader(this.encKeyValue);
+            }
+
+            Consumer<?> consumer = builder.subscribe();
             RateLimiter limiter = (this.consumeRate > 0) ? RateLimiter.create(this.consumeRate) : null;
             while (this.numMessagesToConsume == 0 || numMessagesConsumed < this.numMessagesToConsume) {
                 if (limiter != null) {
                     limiter.acquire();
                 }
 
-                Message<byte[]> msg = consumer.receive(5, TimeUnit.SECONDS);
+                Message<?> msg = consumer.receive(5, TimeUnit.SECONDS);
                 if (msg == null) {
                     LOG.debug("No message to consume after waiting for 5 seconds.");
                 } else {
                     numMessagesConsumed += 1;
-                    System.out.println(MESSAGE_BOUNDARY);
-                    String output = this.interpretMessage(msg, displayHex);
-                    System.out.println(output);
+                    if (!hideContent) {
+                        System.out.println(MESSAGE_BOUNDARY);
+                        String output = this.interpretMessage(msg, displayHex);
+                        System.out.println(output);
+                    } else if (numMessagesConsumed % 1000 == 0) {
+                        System.out.println("Received " + numMessagesConsumed + " messages");
+                    }
                     consumer.acknowledge(msg);
                 }
             }
@@ -214,9 +308,9 @@ public class CmdConsume {
 
         String wsTopic = String.format(
                 "%s/%s/" + (StringUtils.isEmpty(topicName.getCluster()) ? "" : topicName.getCluster() + "/")
-                        + "%s/%s/%s?subscriptionType=%s",
+                        + "%s/%s/%s?subscriptionType=%s&subscriptionMode=%s",
                 topicName.getDomain(), topicName.getTenant(), topicName.getNamespacePortion(), topicName.getLocalName(),
-                subscriptionName, subscriptionType.toString());
+                subscriptionName, subscriptionType.toString(), subscriptionMode.toString());
 
         String consumerBaseUri = serviceURL + (serviceURL.endsWith("/") ? "" : "/") + "ws/consumer/" + wsTopic;
         URI consumerUri = URI.create(consumerBaseUri);

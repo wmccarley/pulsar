@@ -18,13 +18,18 @@
  */
 package org.apache.pulsar.client.impl.schema;
 
-import static org.testng.Assert.assertEquals;
-
+import com.google.common.collect.Maps;
 import org.apache.pulsar.client.api.Schema;
 import org.apache.pulsar.common.schema.KeyValueEncodingType;
 import org.apache.pulsar.common.schema.SchemaInfo;
+import org.apache.pulsar.common.schema.SchemaType;
 import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
+
+import java.util.HashMap;
+import java.util.Map;
+
+import static org.testng.Assert.assertEquals;
 
 /**
  * Unit test {@link org.apache.pulsar.common.schema.SchemaInfo}.
@@ -50,7 +55,7 @@ public class SchemaInfoTest {
         + "  \"schema\": {\n"
         + "    \"type\": \"record\",\n"
         + "    \"name\": \"Bar\",\n"
-        + "    \"namespace\": \"org.apache.pulsar.client.impl.schema.SchemaTestUtils$\",\n"
+        + "    \"namespace\": \"org.apache.pulsar.client.impl.schema.SchemaTestUtils\",\n"
         + "    \"fields\": [\n"
         + "      {\n"
         + "        \"name\": \"field1\",\n"
@@ -61,6 +66,7 @@ public class SchemaInfoTest {
         + "  \"type\": \"JSON\",\n"
         + "  \"properties\": {\n"
         + "    \"__alwaysAllowNull\": \"true\",\n"
+        + "    \"__jsr310ConversionEnabled\": \"false\",\n"
         + "    \"bar1\": \"bar-value1\",\n"
         + "    \"bar2\": \"bar-value2\",\n"
         + "    \"bar3\": \"bar-value3\"\n"
@@ -72,8 +78,22 @@ public class SchemaInfoTest {
         + "  \"schema\": {\n"
         + "    \"type\": \"record\",\n"
         + "    \"name\": \"Foo\",\n"
-        + "    \"namespace\": \"org.apache.pulsar.client.impl.schema.SchemaTestUtils$\",\n"
+        + "    \"namespace\": \"org.apache.pulsar.client.impl.schema.SchemaTestUtils\",\n"
         + "    \"fields\": [\n"
+        + "      {\n"
+        + "        \"name\": \"color\",\n"
+        + "        \"type\": [\n"
+        + "          \"null\",\n"
+        + "          {\n"
+        + "            \"type\": \"enum\",\n"
+        + "            \"name\": \"Color\",\n"
+        + "            \"symbols\": [\n"
+        + "              \"RED\",\n"
+        + "              \"BLUE\"\n"
+        + "            ]\n"
+        + "          }\n"
+        + "        ]\n"
+        + "      },\n"
         + "      {\n"
         + "        \"name\": \"field1\",\n"
         + "        \"type\": [\n"
@@ -109,20 +129,6 @@ public class SchemaInfoTest {
         + "        ]\n"
         + "      },\n"
         + "      {\n"
-        + "        \"name\": \"color\",\n"
-        + "        \"type\": [\n"
-        + "          \"null\",\n"
-        + "          {\n"
-        + "            \"type\": \"enum\",\n"
-        + "            \"name\": \"Color\",\n"
-        + "            \"symbols\": [\n"
-        + "              \"RED\",\n"
-        + "              \"BLUE\"\n"
-        + "            ]\n"
-        + "          }\n"
-        + "        ]\n"
-        + "      },\n"
-        + "      {\n"
         + "        \"name\": \"fieldUnableNull\",\n"
         + "        \"type\": \"string\",\n"
         + "        \"default\": \"defaultValue\"\n"
@@ -132,6 +138,7 @@ public class SchemaInfoTest {
         + "  \"type\": \"AVRO\",\n"
         + "  \"properties\": {\n"
         + "    \"__alwaysAllowNull\": \"false\",\n"
+        + "    \"__jsr310ConversionEnabled\": \"false\",\n"
         + "    \"foo1\": \"foo-value1\",\n"
         + "    \"foo2\": \"foo-value2\",\n"
         + "    \"foo3\": \"foo-value3\"\n"
@@ -146,8 +153,22 @@ public class SchemaInfoTest {
         + "      \"schema\": {\n"
         + "        \"type\": \"record\",\n"
         + "        \"name\": \"Foo\",\n"
-        + "        \"namespace\": \"org.apache.pulsar.client.impl.schema.SchemaTestUtils$\",\n"
+        + "        \"namespace\": \"org.apache.pulsar.client.impl.schema.SchemaTestUtils\",\n"
         + "        \"fields\": [\n"
+        + "          {\n"
+        + "            \"name\": \"color\",\n"
+        + "            \"type\": [\n"
+        + "              \"null\",\n"
+        + "              {\n"
+        + "                \"type\": \"enum\",\n"
+        + "                \"name\": \"Color\",\n"
+        + "                \"symbols\": [\n"
+        + "                  \"RED\",\n"
+        + "                  \"BLUE\"\n"
+        + "                ]\n"
+        + "              }\n"
+        + "            ]\n"
+        + "          },\n"
         + "          {\n"
         + "            \"name\": \"field1\",\n"
         + "            \"type\": [\n"
@@ -183,20 +204,6 @@ public class SchemaInfoTest {
         + "            ]\n"
         + "          },\n"
         + "          {\n"
-        + "            \"name\": \"color\",\n"
-        + "            \"type\": [\n"
-        + "              \"null\",\n"
-        + "              {\n"
-        + "                \"type\": \"enum\",\n"
-        + "                \"name\": \"Color\",\n"
-        + "                \"symbols\": [\n"
-        + "                  \"RED\",\n"
-        + "                  \"BLUE\"\n"
-        + "                ]\n"
-        + "              }\n"
-        + "            ]\n"
-        + "          },\n"
-        + "          {\n"
         + "            \"name\": \"fieldUnableNull\",\n"
         + "            \"type\": \"string\",\n"
         + "            \"default\": \"defaultValue\"\n"
@@ -206,6 +213,7 @@ public class SchemaInfoTest {
         + "      \"type\": \"AVRO\",\n"
         + "      \"properties\": {\n"
         + "        \"__alwaysAllowNull\": \"false\",\n"
+        + "        \"__jsr310ConversionEnabled\": \"false\",\n"
         + "        \"foo1\": \"foo-value1\",\n"
         + "        \"foo2\": \"foo-value2\",\n"
         + "        \"foo3\": \"foo-value3\"\n"
@@ -216,7 +224,7 @@ public class SchemaInfoTest {
         + "      \"schema\": {\n"
         + "        \"type\": \"record\",\n"
         + "        \"name\": \"Bar\",\n"
-        + "        \"namespace\": \"org.apache.pulsar.client.impl.schema.SchemaTestUtils$\",\n"
+        + "        \"namespace\": \"org.apache.pulsar.client.impl.schema.SchemaTestUtils\",\n"
         + "        \"fields\": [\n"
         + "          {\n"
         + "            \"name\": \"field1\",\n"
@@ -227,6 +235,7 @@ public class SchemaInfoTest {
         + "      \"type\": \"JSON\",\n"
         + "      \"properties\": {\n"
         + "        \"__alwaysAllowNull\": \"true\",\n"
+        + "        \"__jsr310ConversionEnabled\": \"false\",\n"
         + "        \"bar1\": \"bar-value1\",\n"
         + "        \"bar2\": \"bar-value2\",\n"
         + "        \"bar3\": \"bar-value3\"\n"
@@ -236,17 +245,17 @@ public class SchemaInfoTest {
         + "  \"type\": \"KEY_VALUE\",\n"
         + "  \"properties\": {\n"
         + "    \"key.schema.name\": \"\",\n"
-        + "    \"key.schema.properties\": \"{\\\"__alwaysAllowNull\\\":\\\"false\\\",\\\"foo1\\\":\\\"foo-value1\\\",\\\"foo2\\\":\\\"foo-value2\\\",\\\"foo3\\\":\\\"foo-value3\\\"}\",\n"
+        + "    \"key.schema.properties\": \"{\\\"__alwaysAllowNull\\\":\\\"false\\\",\\\"__jsr310ConversionEnabled\\\":\\\"false\\\",\\\"foo1\\\":\\\"foo-value1\\\",\\\"foo2\\\":\\\"foo-value2\\\",\\\"foo3\\\":\\\"foo-value3\\\"}\",\n"
         + "    \"key.schema.type\": \"AVRO\",\n"
         + "    \"kv.encoding.type\": \"SEPARATED\",\n"
         + "    \"value.schema.name\": \"\",\n"
-        + "    \"value.schema.properties\": \"{\\\"__alwaysAllowNull\\\":\\\"true\\\",\\\"bar1\\\":\\\"bar-value1\\\",\\\"bar2\\\":\\\"bar-value2\\\",\\\"bar3\\\":\\\"bar-value3\\\"}\",\n"
+        + "    \"value.schema.properties\": \"{\\\"__alwaysAllowNull\\\":\\\"true\\\",\\\"__jsr310ConversionEnabled\\\":\\\"false\\\",\\\"bar1\\\":\\\"bar-value1\\\",\\\"bar2\\\":\\\"bar-value2\\\",\\\"bar3\\\":\\\"bar-value3\\\"}\",\n"
         + "    \"value.schema.type\": \"JSON\"\n"
         + "  }\n"
         + "}";
 
     @DataProvider(name = "schemas")
-    public Object[][] schemas() {
+    public static Object[][] schemas() {
         return new Object[][] {
             {
                 Schema.STRING.getSchemaInfo(), UTF8_SCHEMA_INFO
@@ -276,4 +285,47 @@ public class SchemaInfoTest {
         assertEquals(si.toString(), jsonifiedStr);
     }
 
+    public static class SchemaInfoBuilderTest {
+
+        @Test
+        public void testUnsetProperties() {
+            final SchemaInfo schemaInfo = SchemaInfo.builder()
+                    .type(SchemaType.STRING)
+                    .schema(new byte[0])
+                    .name("string")
+                    .build();
+
+            assertEquals(schemaInfo.getSchema(), new byte[0]);
+            assertEquals(schemaInfo.getType(), SchemaType.STRING);
+            assertEquals(schemaInfo.getName(), "string");
+            assertEquals(schemaInfo.getProperties(), Maps.newHashMap());
+        }
+
+        @Test
+        public void testSetProperties() {
+            final Map<String, String> map = Maps.newHashMap();
+            map.put("test", "value");
+            final SchemaInfo schemaInfo = SchemaInfo.builder()
+                    .type(SchemaType.STRING)
+                    .schema(new byte[0])
+                    .name("string")
+                    .properties(map)
+                    .build();
+
+            assertEquals(schemaInfo.getSchema(), new byte[0]);
+            assertEquals(schemaInfo.getType(), SchemaType.STRING);
+            assertEquals(schemaInfo.getName(), "string");
+            assertEquals(schemaInfo.getProperties(), Maps.newHashMap(map));
+        }
+
+        @Test
+        public void testNullPropertyValue() {
+            final Map<String, String> map = new HashMap<>();
+            map.put("key", null);
+            final IntSchema schema = new IntSchema();
+            schema.getSchemaInfo().setProperties(map);
+            // null key will be skipped by Gson when serializing JSON to String
+            assertEquals(schema.getSchemaInfo().toString(), INT32_SCHEMA_INFO);
+        }
+    }
 }

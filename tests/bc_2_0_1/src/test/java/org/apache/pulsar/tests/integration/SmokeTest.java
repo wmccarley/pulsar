@@ -18,6 +18,7 @@
  */
 package org.apache.pulsar.tests.integration;
 
+import lombok.Cleanup;
 import org.apache.pulsar.client.api.Consumer;
 import org.apache.pulsar.client.api.Message;
 import org.apache.pulsar.client.api.Producer;
@@ -44,6 +45,8 @@ public class SmokeTest {
 
     @Test
     public void checkMessages() throws PulsarClientException {
+
+        @Cleanup
         PulsarClient client = PulsarClient.builder()
                 .serviceUrl(pulsarContainer.getPlainTextPulsarBrokerUrl())
                 .build();
@@ -69,7 +72,7 @@ public class SmokeTest {
 
     }
 
-    @AfterClass
+    @AfterClass(alwaysRun = true)
     public void cleanup(){
         pulsarContainer.stop();
     }

@@ -32,8 +32,6 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
-import org.apache.bookkeeper.test.PortManager;
-import org.apache.pulsar.broker.NoOpShutdownService;
 import org.apache.pulsar.broker.PulsarService;
 import org.apache.pulsar.broker.ServiceConfiguration;
 import org.apache.pulsar.broker.ServiceConfigurationUtils;
@@ -50,19 +48,20 @@ import org.apache.pulsar.common.policies.data.TenantInfo;
 import org.apache.pulsar.common.util.ObjectMapperFactory;
 import org.apache.pulsar.functions.runtime.thread.ThreadRuntimeFactory;
 import org.apache.pulsar.functions.runtime.thread.ThreadRuntimeFactoryConfig;
+import org.apache.pulsar.functions.worker.PulsarWorkerService;
 import org.apache.pulsar.functions.worker.WorkerConfig;
 import org.apache.pulsar.functions.worker.WorkerService;
-import org.apache.pulsar.functions.worker.rest.WorkerServer;
 import org.apache.pulsar.zookeeper.LocalBookkeeperEnsemble;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.testng.annotations.AfterMethod;
 import org.testng.annotations.BeforeMethod;
+import org.testng.annotations.Test;
 
 /**
  * Test Pulsar sink on function
- *
  */
+@Test(groups = "broker-io")
 public class PulsarFunctionAdminTest {
     LocalBookkeeperEnsemble bkEnsemble;
 
@@ -73,18 +72,10 @@ public class PulsarFunctionAdminTest {
     PulsarAdmin admin;
     PulsarClient pulsarClient;
     BrokerStats brokerStatsClient;
-    WorkerServer functionsWorkerServer;
-    WorkerService functionsWorkerService;
+    PulsarWorkerService functionsWorkerService;
     final String tenant = "external-repl-prop";
     String pulsarFunctionsNamespace = tenant + "/pulsar-function-admin";
     String primaryHost;
-
-    private final int ZOOKEEPER_PORT = PortManager.nextFreePort();
-    private final int brokerWebServicePort = PortManager.nextFreePort();
-    private final int brokerWebServiceTlsPort = PortManager.nextFreePort();
-    private final int brokerServicePort = PortManager.nextFreePort();
-    private final int brokerServiceTlsPort = PortManager.nextFreePort();
-    private final int workerServicePort = PortManager.nextFreePort();
 
     private final String TLS_SERVER_CERT_FILE_PATH = "./src/test/resources/authentication/tls/broker-cert.pem";
     private final String TLS_SERVER_KEY_FILE_PATH = "./src/test/resources/authentication/tls/broker-key.pem";
@@ -93,26 +84,24 @@ public class PulsarFunctionAdminTest {
 
     private static final Logger log = LoggerFactory.getLogger(PulsarFunctionAdminTest.class);
 
-    @BeforeMethod
+    @BeforeMethod(groups = "broker")
     void setup(Method method) throws Exception {
 
         log.info("--- Setting up method {} ---", method.getName());
 
         // Start local bookkeeper ensemble
-        bkEnsemble = new LocalBookkeeperEnsemble(3, ZOOKEEPER_PORT, () -> PortManager.nextFreePort());
+        bkEnsemble = new LocalBookkeeperEnsemble(3, 0, () -> 0);
         bkEnsemble.start();
-
-        String brokerServiceUrl = "https://127.0.0.1:" + brokerWebServiceTlsPort;
 
         config = spy(new ServiceConfiguration());
         config.setClusterName("use");
-        Set<String> superUsers = Sets.newHashSet("superUser");
+        Set<String> superUsers = Sets.newHashSet("superUser", "admin");
         config.setSuperUserRoles(superUsers);
-        config.setWebServicePort(Optional.ofNullable(brokerWebServicePort));
-        config.setWebServicePortTls(Optional.ofNullable(brokerWebServiceTlsPort));
-        config.setZookeeperServers("127.0.0.1" + ":" + ZOOKEEPER_PORT);
-        config.setBrokerServicePort(Optional.ofNullable(brokerServicePort));
-        config.setBrokerServicePortTls(Optional.ofNullable(brokerServiceTlsPort));
+        config.setWebServicePort(Optional.of(0));
+        config.setWebServicePortTls(Optional.of(0));
+        config.setZookeeperServers("127.0.0.1" + ":" + bkEnsemble.getZookeeperPort());
+        config.setBrokerServicePort(Optional.of(0));
+        config.setBrokerServicePortTls(Optional.of(0));
         config.setLoadManagerClassName(SimpleLoadManagerImpl.class.getName());
 
 
@@ -126,11 +115,10 @@ public class PulsarFunctionAdminTest {
 
 
         functionsWorkerService = createPulsarFunctionWorker(config);
-        urlTls = new URL(brokerServiceUrl);
         Optional<WorkerService> functionWorkerService = Optional.of(functionsWorkerService);
-        pulsar = new PulsarService(config, functionWorkerService);
-        pulsar.setShutdownService(new NoOpShutdownService());
+        pulsar = new PulsarService(config, workerConfig, functionWorkerService, (exitCode) -> {});
         pulsar.start();
+        urlTls = new URL(pulsar.getBrokerServiceUrlTls());
 
         Map<String, String> authParams = new HashMap<>();
         authParams.put("tlsCertFile", TLS_CLIENT_CERT_FILE_PATH);
@@ -139,23 +127,27 @@ public class PulsarFunctionAdminTest {
         authTls.configure(authParams);
 
         admin = spy(
-                PulsarAdmin.builder().serviceHttpUrl(brokerServiceUrl).tlsTrustCertsFilePath(TLS_CLIENT_CERT_FILE_PATH)
-                        .allowTlsInsecureConnection(true).authentication(authTls).build());
+                PulsarAdmin.builder()
+                        .serviceHttpUrl(pulsar.getWebServiceAddressTls())
+                        .tlsTrustCertsFilePath(TLS_CLIENT_CERT_FILE_PATH)
+                        .allowTlsInsecureConnection(true)
+                        .authentication(authTls)
+                        .build());
 
         brokerStatsClient = admin.brokerStats();
-        primaryHost = String.format("http://%s:%d", "localhost", brokerWebServicePort);
+        primaryHost = pulsar.getWebServiceAddress();
 
         // update cluster metadata
         ClusterData clusterData = new ClusterData(urlTls.toString());
         admin.clusters().updateCluster(config.getClusterName(), clusterData);
 
         ClientBuilder clientBuilder = PulsarClient.builder().serviceUrl(this.workerConfig.getPulsarServiceUrl());
-        if (isNotBlank(workerConfig.getClientAuthenticationPlugin())
-                && isNotBlank(workerConfig.getClientAuthenticationParameters())) {
+        if (isNotBlank(workerConfig.getBrokerClientAuthenticationPlugin())
+                && isNotBlank(workerConfig.getBrokerClientAuthenticationParameters())) {
             clientBuilder.enableTls(workerConfig.isUseTls());
             clientBuilder.allowTlsInsecureConnection(workerConfig.isTlsAllowInsecureConnection());
-            clientBuilder.authentication(workerConfig.getClientAuthenticationPlugin(),
-                    workerConfig.getClientAuthenticationParameters());
+            clientBuilder.authentication(workerConfig.getBrokerClientAuthenticationPlugin(),
+                    workerConfig.getBrokerClientAuthenticationParameters());
         }
         pulsarClient = clientBuilder.build();
 
@@ -166,7 +158,7 @@ public class PulsarFunctionAdminTest {
         Thread.sleep(100);
     }
 
-    @AfterMethod
+    @AfterMethod(alwaysRun = true)
     void shutdown() throws Exception {
         log.info("--- Shutting down ---");
         pulsarClient.close();
@@ -176,7 +168,7 @@ public class PulsarFunctionAdminTest {
         bkEnsemble.stop();
     }
 
-    private WorkerService createPulsarFunctionWorker(ServiceConfiguration config) {
+    private PulsarWorkerService createPulsarFunctionWorker(ServiceConfiguration config) {
         workerConfig = new WorkerConfig();
         workerConfig.setPulsarFunctionsNamespace(pulsarFunctionsNamespace);
         workerConfig.setSchedulerClassName(
@@ -193,20 +185,22 @@ public class PulsarFunctionAdminTest {
         workerConfig.setFunctionAssignmentTopicName("assignment");
         workerConfig.setFunctionMetadataTopicName("metadata");
         workerConfig.setInstanceLivenessCheckFreqMs(100);
-        workerConfig.setWorkerPort(workerServicePort);
+        workerConfig.setWorkerPort(0);
         workerConfig.setPulsarFunctionsCluster(config.getClusterName());
         String hostname = ServiceConfigurationUtils.getDefaultOrConfiguredAddress(config.getAdvertisedAddress());
         workerConfig.setWorkerHostname(hostname);
         workerConfig
                 .setWorkerId("c-" + config.getClusterName() + "-fw-" + hostname + "-" + workerConfig.getWorkerPort());
 
-        workerConfig.setClientAuthenticationPlugin(AuthenticationTls.class.getName());
-        workerConfig.setClientAuthenticationParameters(
+        workerConfig.setBrokerClientAuthenticationPlugin(AuthenticationTls.class.getName());
+        workerConfig.setBrokerClientAuthenticationParameters(
                 String.format("tlsCertFile:%s,tlsKeyFile:%s", TLS_CLIENT_CERT_FILE_PATH, TLS_CLIENT_KEY_FILE_PATH));
         workerConfig.setUseTls(true);
         workerConfig.setTlsAllowInsecureConnection(true);
         workerConfig.setTlsTrustCertsFilePath(TLS_CLIENT_CERT_FILE_PATH);
 
-        return new WorkerService(workerConfig);
+        PulsarWorkerService workerService = new PulsarWorkerService();
+        workerService.init(workerConfig, null, false);
+        return workerService;
     }
 }

@@ -29,26 +29,39 @@ import io.netty.channel.EventLoopGroup;
 import io.netty.util.concurrent.DefaultThreadFactory;
 import io.prometheus.client.Counter;
 import io.prometheus.client.Gauge;
+import lombok.Getter;
+import lombok.Setter;
 
 import java.io.Closeable;
 import java.io.IOException;
-import java.net.InetAddress;
 import java.net.InetSocketAddress;
-import java.net.UnknownHostException;
+import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
+import org.apache.pulsar.broker.ServiceConfigurationUtils;
 import org.apache.pulsar.broker.authentication.AuthenticationService;
 import org.apache.pulsar.broker.authorization.AuthorizationService;
 import org.apache.pulsar.broker.cache.ConfigurationCacheService;
+import org.apache.pulsar.broker.cache.ConfigurationMetadataCacheService;
+import org.apache.pulsar.broker.resources.PulsarResources;
 import org.apache.pulsar.common.allocator.PulsarByteBufAllocator;
 import org.apache.pulsar.common.configuration.PulsarConfigurationLoader;
 import org.apache.pulsar.common.util.netty.EventLoopUtil;
-import org.apache.pulsar.zookeeper.ZooKeeperClientFactory;
-import org.apache.pulsar.zookeeper.ZookeeperClientFactoryImpl;
+import org.apache.pulsar.metadata.api.MetadataStoreException;
+import org.apache.pulsar.metadata.api.extended.MetadataStoreExtended;
+import org.apache.pulsar.broker.web.plugin.servlet.AdditionalServlets;
+import org.apache.pulsar.proxy.stats.TopicStats;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import com.google.common.collect.Maps;
+import com.google.common.collect.Sets;
 
 /**
  * Pulsar proxy service
@@ -58,10 +71,12 @@ public class ProxyService implements Closeable {
     private final ProxyConfiguration proxyConfig;
     private String serviceUrl;
     private String serviceUrlTls;
-    private ConfigurationCacheService configurationCacheService;
+    private ConfigurationMetadataCacheService configurationCacheService;
     private final AuthenticationService authenticationService;
     private AuthorizationService authorizationService;
-    private ZooKeeperClientFactory zkClientFactory = null;
+    private MetadataStoreExtended localMetadataStore;
+    private MetadataStoreExtended configMetadataStore;
+    private PulsarResources pulsarResources;
 
     private final EventLoopGroup acceptorGroup;
     private final EventLoopGroup workerGroup;
@@ -76,7 +91,11 @@ public class ProxyService implements Closeable {
 
     protected final AtomicReference<Semaphore> lookupRequestSemaphore;
 
-    protected static int proxyLogLevel;
+    @Getter
+    @Setter
+    protected int proxyLogLevel;
+
+    private final ScheduledExecutorService statsExecutor;
 
     private static final int numThreads = Runtime.getRuntime().availableProcessors();
 
@@ -98,28 +117,60 @@ public class ProxyService implements Closeable {
     static final Counter bytesCounter = Counter
             .build("pulsar_proxy_binary_bytes", "Counter of proxy bytes").create().register();
 
+    @Getter
+    private final Set<ProxyConnection> clientCnxs;
+    @Getter
+    private final Map<String, TopicStats> topicStats;
+    @Getter
+    private AdditionalServlets proxyAdditionalServlets;
+
     public ProxyService(ProxyConfiguration proxyConfig,
                         AuthenticationService authenticationService) throws IOException {
         checkNotNull(proxyConfig);
         this.proxyConfig = proxyConfig;
+        this.clientCnxs = Sets.newConcurrentHashSet();
+        this.topicStats = Maps.newConcurrentMap();
 
         this.lookupRequestSemaphore = new AtomicReference<Semaphore>(
                 new Semaphore(proxyConfig.getMaxConcurrentLookupRequests(), false));
 
-        if (proxyConfig.getproxyLogLevel().isPresent()) {
-            ProxyService.proxyLogLevel = Integer.valueOf(proxyConfig.getproxyLogLevel().get());
+        if (proxyConfig.getProxyLogLevel().isPresent()) {
+            proxyLogLevel = proxyConfig.getProxyLogLevel().get();
         } else {
-            ProxyService.proxyLogLevel = 0;
+            proxyLogLevel = 0;
         }
         this.acceptorGroup = EventLoopUtil.newEventLoopGroup(1, acceptorThreadFactory);
         this.workerGroup = EventLoopUtil.newEventLoopGroup(numThreads, workersThreadFactory);
         this.authenticationService = authenticationService;
+
+        statsExecutor = Executors
+                .newSingleThreadScheduledExecutor(new DefaultThreadFactory("proxy-stats-executor"));
+        statsExecutor.schedule(()->{
+            this.clientCnxs.forEach(cnx -> {
+                if (cnx.getDirectProxyHandler() != null
+                        && cnx.getDirectProxyHandler().getInboundChannelRequestsRate() != null) {
+                    cnx.getDirectProxyHandler().getInboundChannelRequestsRate().calculateRate();
+                }
+            });
+            this.topicStats.forEach((topic, stats) -> {
+                stats.calculate();
+            });
+        }, 60, TimeUnit.SECONDS);
+        this.proxyAdditionalServlets = AdditionalServlets.load(proxyConfig);
     }
 
     public void start() throws Exception {
+        if (proxyConfig.isAuthorizationEnabled() && !proxyConfig.isAuthenticationEnabled()) {
+            throw new IllegalStateException("Invalid proxy configuration. Authentication must be enabled with "
+                    + "authenticationEnabled=true when authorization is enabled with authorizationEnabled=true.");
+        }
+
         if (!isBlank(proxyConfig.getZookeeperServers()) && !isBlank(proxyConfig.getConfigurationStoreServers())) {
-            discoveryProvider = new BrokerDiscoveryProvider(this.proxyConfig, getZooKeeperClientFactory());
-            this.configurationCacheService = new ConfigurationCacheService(discoveryProvider.globalZkCache);
+            localMetadataStore = createLocalMetadataStore();
+            configMetadataStore = createConfigurationMetadataStore();
+            pulsarResources = new PulsarResources(localMetadataStore, configMetadataStore);
+            discoveryProvider = new BrokerDiscoveryProvider(this.proxyConfig, pulsarResources);
+            this.configurationCacheService = new ConfigurationMetadataCacheService(pulsarResources, null);
             authorizationService = new AuthorizationService(PulsarConfigurationLoader.convertFrom(proxyConfig),
                                                             configurationCacheService);
         }
@@ -138,7 +189,7 @@ public class ProxyService implements Closeable {
         // Bind and start to accept incoming connections.
         if (proxyConfig.getServicePort().isPresent()) {
             try {
-                listenChannel = bootstrap.bind(proxyConfig.getServicePort().get()).sync().channel();
+                listenChannel = bootstrap.bind(proxyConfig.getBindAddress(), proxyConfig.getServicePort().get()).sync().channel();
                 LOG.info("Started Pulsar Proxy at {}", listenChannel.localAddress());
             } catch (Exception e) {
                 throw new IOException("Failed to bind Pulsar Proxy on port " + proxyConfig.getServicePort().get(), e);
@@ -148,16 +199,12 @@ public class ProxyService implements Closeable {
         if (proxyConfig.getServicePortTls().isPresent()) {
             ServerBootstrap tlsBootstrap = bootstrap.clone();
             tlsBootstrap.childHandler(new ServiceChannelInitializer(this, proxyConfig, true));
-            listenChannelTls = tlsBootstrap.bind(proxyConfig.getServicePortTls().get()).sync().channel();
+            listenChannelTls = tlsBootstrap.bind(proxyConfig.getBindAddress(), proxyConfig.getServicePortTls().get()).sync().channel();
             LOG.info("Started Pulsar TLS Proxy on {}", listenChannelTls.localAddress());
         }
 
-        String hostname;
-        try {
-            hostname = InetAddress.getLocalHost().getHostName();
-        } catch (UnknownHostException e) {
-            throw new RuntimeException(e);
-        }
+        final String hostname =
+            ServiceConfigurationUtils.getDefaultOrConfiguredAddress(proxyConfig.getAdvertisedAddress());
 
         if (proxyConfig.getServicePort().isPresent()) {
             this.serviceUrl = String.format("pulsar://%s:%d/", hostname, getListenPort().get());
@@ -170,14 +217,6 @@ public class ProxyService implements Closeable {
         } else {
             this.serviceUrlTls = null;
         }
-    }
-
-    public ZooKeeperClientFactory getZooKeeperClientFactory() {
-        if (zkClientFactory == null) {
-            zkClientFactory = new ZookeeperClientFactoryImpl();
-        }
-        // Return default factory
-        return zkClientFactory;
     }
 
     public BrokerDiscoveryProvider getDiscoveryProvider() {
@@ -197,6 +236,29 @@ public class ProxyService implements Closeable {
             listenChannelTls.close();
         }
 
+        if (statsExecutor != null) {
+            statsExecutor.shutdown();
+        }
+
+        if (proxyAdditionalServlets != null) {
+            proxyAdditionalServlets.close();
+            proxyAdditionalServlets = null;
+        }
+
+        if (localMetadataStore != null) {
+            try {
+                localMetadataStore.close();
+            } catch (Exception e) {
+                throw new IOException(e);
+            }
+        }
+        if (configMetadataStore != null) {
+            try {
+                configMetadataStore.close();
+            } catch (Exception e) {
+                throw new IOException(e);
+            }
+        }
         acceptorGroup.shutdownGracefully();
         workerGroup.shutdownGracefully();
     }
@@ -225,7 +287,7 @@ public class ProxyService implements Closeable {
         return configurationCacheService;
     }
 
-    public void setConfigurationCacheService(ConfigurationCacheService configurationCacheService) {
+    public void setConfigurationCacheService(ConfigurationMetadataCacheService configurationCacheService) {
         this.configurationCacheService = configurationCacheService;
     }
 
@@ -251,6 +313,16 @@ public class ProxyService implements Closeable {
         } else {
             return Optional.empty();
         }
+    }
+
+    public MetadataStoreExtended createLocalMetadataStore() throws MetadataStoreException {
+        return PulsarResources.createMetadataStore(proxyConfig.getZookeeperServers(),
+                proxyConfig.getZookeeperSessionTimeoutMs());
+    }
+
+    public MetadataStoreExtended createConfigurationMetadataStore() throws MetadataStoreException {
+        return PulsarResources.createMetadataStore(proxyConfig.getConfigurationStoreServers(),
+                proxyConfig.getZookeeperSessionTimeoutMs());
     }
 
     private static final Logger LOG = LoggerFactory.getLogger(ProxyService.class);

@@ -117,11 +117,28 @@ static Result getResult(ServerError serverError) {
 
         case InvalidTxnStatus:
             return ResultInvalidTxnStatusError;
+
+        case NotAllowedError:
+            return ResultNotAllowedError;
+
+        case TransactionConflict:
+            return ResultTransactionConflict;
+
+        case TransactionNotFound:
+            return ResultTransactionNotFound;
+
+        case ProducerFenced:
+            return ResultProducerFenced;
     }
     // NOTE : Do not add default case in the switch above. In future if we get new cases for
     // ServerError and miss them in the switch above we would like to get notified. Adding
     // return here to make the compiler happy.
     return ResultUnknownError;
+}
+
+inline std::ostream& operator<<(std::ostream& os, ServerError error) {
+    os << getResult(error);
+    return os;
 }
 
 static bool file_exists(const std::string& path) {
@@ -132,6 +149,8 @@ static bool file_exists(const std::string& path) {
     return f.good();
 }
 
+std::atomic<int32_t> ClientConnection::maxMessageSize_{Commands::DefaultMaxMessageSize};
+
 ClientConnection::ClientConnection(const std::string& logicalAddress, const std::string& physicalAddress,
                                    ExecutorServicePtr executor,
                                    const ClientConfiguration& clientConfiguration,
@@ -140,16 +159,15 @@ ClientConnection::ClientConnection(const std::string& logicalAddress, const std:
       operationsTimeout_(seconds(clientConfiguration.getOperationTimeoutSeconds())),
       authentication_(authentication),
       serverProtocolVersion_(ProtocolVersion_MIN),
-      maxMessageSize_(Commands::DefaultMaxMessageSize),
       executor_(executor),
       resolver_(executor_->createTcpResolver()),
       socket_(executor_->createSocket()),
 #if BOOST_VERSION >= 107000
-      strand_(boost::asio::make_strand(executor_->io_service_.get_executor())),
+      strand_(boost::asio::make_strand(executor_->io_service_->get_executor())),
 #elif BOOST_VERSION >= 106600
-      strand_(executor_->io_service_.get_executor()),
+      strand_(executor_->io_service_->get_executor()),
 #else
-      strand_(executor_->io_service_),
+      strand_(*(executor_->io_service_)),
 #endif
       logicalAddress_(logicalAddress),
       physicalAddress_(physicalAddress),
@@ -173,6 +191,8 @@ ClientConnection::ClientConnection(const std::string& logicalAddress, const std:
 #else
         boost::asio::ssl::context ctx(executor_->io_service_, boost::asio::ssl::context::tlsv1_client);
 #endif
+        Url serviceUrl;
+        Url::parse(physicalAddress, serviceUrl);
         if (clientConfiguration.isTlsAllowInsecureConnection()) {
             ctx.set_verify_mode(boost::asio::ssl::context::verify_none);
             isTlsAllowInsecureConnection_ = true;
@@ -180,9 +200,7 @@ ClientConnection::ClientConnection(const std::string& logicalAddress, const std:
             ctx.set_verify_mode(boost::asio::ssl::context::verify_peer);
 
             if (clientConfiguration.isValidateHostName()) {
-                Url service_url;
-                Url::parse(physicalAddress, service_url);
-                LOG_DEBUG("Validating hostname for " << service_url.host() << ":" << service_url.port());
+                LOG_DEBUG("Validating hostname for " << serviceUrl.host() << ":" << serviceUrl.port());
                 ctx.set_verify_callback(boost::asio::ssl::rfc2818_verification(physicalAddress));
             }
 
@@ -229,6 +247,14 @@ ClientConnection::ClientConnection(const std::string& logicalAddress, const std:
         }
 
         tlsSocket_ = executor_->createTlsSocket(socket_, ctx);
+
+        LOG_DEBUG("TLS SNI Host: " << serviceUrl.host());
+        if (!SSL_set_tlsext_host_name(tlsSocket_->native_handle(), serviceUrl.host().c_str())) {
+            boost::system::error_code ec{static_cast<int>(::ERR_get_error()),
+                                         boost::asio::error::get_ssl_category()};
+            LOG_ERROR(boost::system::system_error{ec}.what() << ": Error while setting TLS SNI");
+            return;
+        }
     }
 }
 
@@ -243,7 +269,7 @@ void ClientConnection::handlePulsarConnected(const CommandConnected& cmdConnecte
 
     if (cmdConnected.has_max_message_size()) {
         LOG_DEBUG("Connection has max message size setting: " << cmdConnected.max_message_size());
-        maxMessageSize_ = cmdConnected.max_message_size();
+        maxMessageSize_.store(cmdConnected.max_message_size(), std::memory_order_release);
         LOG_DEBUG("Current max message size is: " << maxMessageSize_);
     }
 
@@ -254,8 +280,13 @@ void ClientConnection::handlePulsarConnected(const CommandConnected& cmdConnecte
     if (serverProtocolVersion_ >= v1) {
         // Only send keep-alive probes if the broker supports it
         keepAliveTimer_ = executor_->createDeadlineTimer();
-        keepAliveTimer_->expires_from_now(boost::posix_time::seconds(KeepAliveIntervalInSeconds));
-        keepAliveTimer_->async_wait(std::bind(&ClientConnection::handleKeepAliveTimeout, shared_from_this()));
+        Lock lock(mutex_);
+        if (keepAliveTimer_) {
+            keepAliveTimer_->expires_from_now(boost::posix_time::seconds(KeepAliveIntervalInSeconds));
+            keepAliveTimer_->async_wait(
+                std::bind(&ClientConnection::handleKeepAliveTimeout, shared_from_this()));
+        }
+        lock.unlock();
     }
 
     if (serverProtocolVersion_ >= v8) {
@@ -284,10 +315,15 @@ void ClientConnection::startConsumerStatsTimer(std::vector<uint64_t> consumerSta
          it != pendingConsumerStatsMap_.end(); ++it) {
         consumerStatsRequests.push_back(it->first);
     }
-    consumerStatsRequestTimer_->expires_from_now(operationsTimeout_);
-    consumerStatsRequestTimer_->async_wait(std::bind(&ClientConnection::handleConsumerStatsTimeout,
-                                                     shared_from_this(), std::placeholders::_1,
-                                                     consumerStatsRequests));
+
+    // If the close operation has reset the consumerStatsRequestTimer_ then the use_count will be zero
+    // Check if we have a timer still before we set the request timer to pop again.
+    if (consumerStatsRequestTimer_) {
+        consumerStatsRequestTimer_->expires_from_now(operationsTimeout_);
+        consumerStatsRequestTimer_->async_wait(std::bind(&ClientConnection::handleConsumerStatsTimeout,
+                                                         shared_from_this(), std::placeholders::_1,
+                                                         consumerStatsRequests));
+    }
     lock.unlock();
     // Complex logic since promises need to be fulfilled outside the lock
     for (int i = 0; i < consumerStatsPromises.size(); i++) {
@@ -323,9 +359,15 @@ void ClientConnection::handleTcpConnected(const boost::system::error_code& err,
                                           tcp::resolver::iterator endpointIterator) {
     if (!err) {
         std::stringstream cnxStringStream;
-        cnxStringStream << "[" << socket_->local_endpoint() << " -> " << socket_->remote_endpoint() << "] ";
-        cnxString_ = cnxStringStream.str();
-
+        try {
+            cnxStringStream << "[" << socket_->local_endpoint() << " -> " << socket_->remote_endpoint()
+                            << "] ";
+            cnxString_ = cnxStringStream.str();
+        } catch (const boost::system::system_error& e) {
+            LOG_ERROR("Failed to get endpoint: " << e.what());
+            close();
+            return;
+        }
         if (logicalAddress_ == physicalAddress_) {
             LOG_INFO(cnxString_ << "Connected to broker");
         } else {
@@ -409,6 +451,15 @@ void ClientConnection::handleSentPulsarConnect(const boost::system::error_code& 
     readNextCommand();
 }
 
+void ClientConnection::handleSentAuthResponse(const boost::system::error_code& err,
+                                              const SharedBuffer& buffer) {
+    if (err) {
+        LOG_WARN(cnxString_ << "Failed to send auth response: " << err.message());
+        close();
+        return;
+    }
+}
+
 /*
  * Async method to establish TCP connection with broker
  *
@@ -476,6 +527,9 @@ void ClientConnection::handleRead(const boost::system::error_code& err, size_t b
     incomingBuffer_.bytesWritten(bytesTransferred);
 
     if (err || bytesTransferred == 0) {
+        if (err) {
+            LOG_ERROR(cnxString_ << "Read failed: " << err.message());
+        }  // else: bytesTransferred == 0, which means server has closed the connection
         close();
     } else if (bytesTransferred < minReadSize) {
         // Read the remaining part, use a slice of buffer to write on the next
@@ -922,6 +976,7 @@ void ClientConnection::handleIncomingCommand() {
                     const CommandError& error = incomingCmd_.error();
                     Result result = getResult(error.error());
                     LOG_WARN(cnxString_ << "Received error response from server: " << result
+                                        << (error.has_message() ? (" (" + error.message() + ")") : "")
                                         << " -- req_id: " << error.request_id());
 
                     Lock lock(mutex_);
@@ -1019,6 +1074,15 @@ void ClientConnection::handleIncomingCommand() {
                     LOG_DEBUG(cnxString_ << "Received response to ping message");
                     havePendingPingRequest_ = false;
                     break;
+                }
+
+                case BaseCommand::AUTH_CHALLENGE: {
+                    LOG_DEBUG(cnxString_ << "Received auth challenge from broker");
+
+                    SharedBuffer buffer = Commands::newAuthResponse(authentication_);
+                    asyncWrite(buffer.const_asio_buffer(),
+                               std::bind(&ClientConnection::handleSentAuthResponse, shared_from_this(),
+                                         std::placeholders::_1, buffer));
                 }
 
                 case BaseCommand::ACTIVE_CONSUMER_CHANGE: {
@@ -1128,8 +1192,9 @@ Future<Result, BrokerConsumerStatsImpl> ClientConnection::newConsumerStats(uint6
 }
 
 void ClientConnection::newTopicLookup(const std::string& topicName, bool authoritative,
-                                      const uint64_t requestId, LookupDataResultPromisePtr promise) {
-    newLookup(Commands::newLookup(topicName, authoritative, requestId), requestId, promise);
+                                      const std::string& listenerName, const uint64_t requestId,
+                                      LookupDataResultPromisePtr promise) {
+    newLookup(Commands::newLookup(topicName, authoritative, requestId, listenerName), requestId, promise);
 }
 
 void ClientConnection::newPartitionedMetadataLookup(const std::string& topicName, const uint64_t requestId,
@@ -1318,8 +1383,15 @@ void ClientConnection::handleKeepAliveTimeout() {
         havePendingPingRequest_ = true;
         sendCommand(Commands::newPing());
 
-        keepAliveTimer_->expires_from_now(boost::posix_time::seconds(KeepAliveIntervalInSeconds));
-        keepAliveTimer_->async_wait(std::bind(&ClientConnection::handleKeepAliveTimeout, shared_from_this()));
+        // If the close operation has already called the keepAliveTimer_.reset() then the use_count will be
+        // zero And we do not attempt to dereference the pointer.
+        Lock lock(mutex_);
+        if (keepAliveTimer_) {
+            keepAliveTimer_->expires_from_now(boost::posix_time::seconds(KeepAliveIntervalInSeconds));
+            keepAliveTimer_->async_wait(
+                std::bind(&ClientConnection::handleKeepAliveTimeout, shared_from_this()));
+        }
+        lock.unlock();
     }
 }
 
@@ -1340,13 +1412,25 @@ void ClientConnection::close() {
     state_ = Disconnected;
     boost::system::error_code err;
     socket_->close(err);
-    ConsumersMap consumers;
-    consumers.swap(consumers_);
-    ProducersMap producers;
-    producers.swap(producers_);
-    lock.unlock();
 
-    LOG_INFO(cnxString_ << "Connection closed");
+    if (tlsSocket_) {
+        tlsSocket_->lowest_layer().close();
+    }
+
+    if (executor_) {
+        executor_.reset();
+    }
+
+    // Move the internal fields to process them after `mutex_` was unlocked
+    auto consumers = std::move(consumers_);
+    auto producers = std::move(producers_);
+    auto pendingRequests = std::move(pendingRequests_);
+    auto pendingLookupRequests = std::move(pendingLookupRequests_);
+    auto pendingConsumerStatsMap = std::move(pendingConsumerStatsMap_);
+    auto pendingGetLastMessageIdRequests = std::move(pendingGetLastMessageIdRequests_);
+    auto pendingGetNamespaceTopicsRequests = std::move(pendingGetNamespaceTopicsRequests_);
+
+    numOfPendingLookupRequest_ = 0;
 
     if (keepAliveTimer_) {
         keepAliveTimer_->cancel();
@@ -1358,6 +1442,9 @@ void ClientConnection::close() {
         consumerStatsRequestTimer_.reset();
     }
 
+    lock.unlock();
+    LOG_INFO(cnxString_ << "Connection closed");
+
     for (ProducersMap::iterator it = producers.begin(); it != producers.end(); ++it) {
         HandlerBase::handleDisconnection(ResultConnectError, shared_from_this(), it->second);
     }
@@ -1368,38 +1455,22 @@ void ClientConnection::close() {
 
     connectPromise_.setFailed(ResultConnectError);
 
-    // Fail all pending operations on the connection
-    for (PendingRequestsMap::iterator it = pendingRequests_.begin(); it != pendingRequests_.end(); ++it) {
-        it->second.promise.setFailed(ResultConnectError);
+    // Fail all pending requests, all these type are map whose value type contains the Promise object
+    for (auto& kv : pendingRequests) {
+        kv.second.promise.setFailed(ResultConnectError);
     }
-
-    // Fail all pending lookup-requests on the connection
-    lock.lock();
-    PendingLookupRequestsMap pendingLookupRequests;
-    pendingLookupRequests_.swap(pendingLookupRequests);
-    numOfPendingLookupRequest_ -= pendingLookupRequests.size();
-
-    PendingConsumerStatsMap pendingConsumerStatsMap;
-    pendingConsumerStatsMap_.swap(pendingConsumerStatsMap);
-    lock.unlock();
-
-    for (PendingLookupRequestsMap::iterator it = pendingLookupRequests.begin();
-         it != pendingLookupRequests.end(); ++it) {
-        it->second.promise->setFailed(ResultConnectError);
+    for (auto& kv : pendingLookupRequests) {
+        kv.second.promise->setFailed(ResultConnectError);
     }
-
-    for (PendingConsumerStatsMap::iterator it = pendingConsumerStatsMap.begin();
-         it != pendingConsumerStatsMap.end(); ++it) {
+    for (auto& kv : pendingConsumerStatsMap) {
         LOG_ERROR(cnxString_ << " Closing Client Connection, please try again later");
-        it->second.setFailed(ResultConnectError);
+        kv.second.setFailed(ResultConnectError);
     }
-
-    if (tlsSocket_) {
-        tlsSocket_->lowest_layer().close();
+    for (auto& kv : pendingGetLastMessageIdRequests) {
+        kv.second.setFailed(ResultConnectError);
     }
-
-    if (executor_) {
-        executor_.reset();
+    for (auto& kv : pendingGetNamespaceTopicsRequests) {
+        kv.second.setFailed(ResultConnectError);
     }
 }
 
@@ -1435,7 +1506,7 @@ const std::string& ClientConnection::cnxString() const { return cnxString_; }
 
 int ClientConnection::getServerProtocolVersion() const { return serverProtocolVersion_; }
 
-int ClientConnection::getMaxMessageSize() const { return maxMessageSize_; }
+int32_t ClientConnection::getMaxMessageSize() { return maxMessageSize_.load(std::memory_order_acquire); }
 
 Commands::ChecksumType ClientConnection::getChecksumType() const {
     return getServerProtocolVersion() >= proto::v6 ? Commands::Crc32c : Commands::None;

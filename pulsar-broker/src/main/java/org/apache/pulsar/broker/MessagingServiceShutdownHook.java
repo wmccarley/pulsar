@@ -18,21 +18,19 @@
  */
 package org.apache.pulsar.broker;
 
+import io.netty.util.concurrent.DefaultThreadFactory;
 import java.lang.reflect.Method;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
-
-import org.apache.pulsar.broker.PulsarServerException;
+import java.util.function.Consumer;
 import org.apache.pulsar.zookeeper.ZooKeeperSessionWatcher.ShutdownService;
 import org.apache.zookeeper.ZooKeeper.States;
 import org.slf4j.ILoggerFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import io.netty.util.concurrent.DefaultThreadFactory;
 
 public class MessagingServiceShutdownHook extends Thread implements ShutdownService {
 
@@ -40,9 +38,11 @@ public class MessagingServiceShutdownHook extends Thread implements ShutdownServ
     private static final String LogbackLoggerContextClassName = "ch.qos.logback.classic.LoggerContext";
 
     private PulsarService service = null;
+    private final Consumer<Integer> processTerminator;
 
-    public MessagingServiceShutdownHook(PulsarService service) {
+    public MessagingServiceShutdownHook(PulsarService service, Consumer<Integer> processTerminator) {
         this.service = service;
+        this.processTerminator = processTerminator;
     }
 
     @Override
@@ -76,8 +76,9 @@ public class MessagingServiceShutdownHook extends Thread implements ShutdownServ
         } finally {
 
             immediateFlushBufferedLogs();
+
             // always put system to halt immediately
-            Runtime.getRuntime().halt(0);
+            processTerminator.accept(0);
         }
     }
 
@@ -96,8 +97,7 @@ public class MessagingServiceShutdownHook extends Thread implements ShutdownServ
 
         LOG.info("Invoking Runtime.halt({})", exitCode);
         immediateFlushBufferedLogs();
-        Runtime.getRuntime().halt(exitCode);
-
+        processTerminator.accept(exitCode);
     }
 
     public static void immediateFlushBufferedLogs() {

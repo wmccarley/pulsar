@@ -27,13 +27,14 @@ import java.net.URISyntaxException;
 import java.util.Optional;
 
 import org.apache.commons.lang3.StringUtils;
+import org.apache.pulsar.client.api.PulsarClientException;
 import org.apache.pulsar.common.protocol.Commands;
-import org.apache.pulsar.common.api.proto.PulsarApi.CommandGetTopicsOfNamespace;
-import org.apache.pulsar.common.api.proto.PulsarApi.CommandGetSchema;
-import org.apache.pulsar.common.api.proto.PulsarApi.CommandLookupTopic;
-import org.apache.pulsar.common.api.proto.PulsarApi.CommandLookupTopicResponse.LookupType;
-import org.apache.pulsar.common.api.proto.PulsarApi.CommandPartitionedTopicMetadata;
-import org.apache.pulsar.common.api.proto.PulsarApi.ServerError;
+import org.apache.pulsar.common.api.proto.CommandGetTopicsOfNamespace;
+import org.apache.pulsar.common.api.proto.CommandGetSchema;
+import org.apache.pulsar.common.api.proto.CommandLookupTopic;
+import org.apache.pulsar.common.api.proto.CommandLookupTopicResponse.LookupType;
+import org.apache.pulsar.common.api.proto.CommandPartitionedTopicMetadata;
+import org.apache.pulsar.common.api.proto.ServerError;
 import org.apache.pulsar.common.naming.TopicName;
 import org.apache.pulsar.common.protocol.schema.BytesSchemaVersion;
 import org.apache.pulsar.policies.data.loadbalancer.ServiceLookupData;
@@ -157,32 +158,35 @@ public class LookupProxyHandler {
             long requestId = proxyConnection.newRequestId();
             ByteBuf command;
             command = Commands.newLookup(topic, authoritative, requestId);
-            clientCnx.newLookup(command, requestId).thenAccept(result -> {
-                String brokerUrl = connectWithTLS ? result.brokerUrlTls : result.brokerUrl;
-                if (result.redirect) {
-                    // Need to try the lookup again on a different broker
-                    performLookup(clientRequestId, topic, brokerUrl, result.authoritative, numberOfRetries - 1);
+
+            clientCnx.newLookup(command, requestId).whenComplete((r, t) -> {
+                if (t != null) {
+                    log.warn("[{}] Failed to lookup topic {}: {}", clientAddress, topic, t.getMessage());
+                    proxyConnection.ctx().writeAndFlush(
+                        Commands.newLookupErrorResponse(ServerError.ServiceNotReady, t.getMessage(), clientRequestId));
                 } else {
-                    // Reply the same address for both TLS non-TLS. The reason
-                    // is that whether we use TLS
-                    // and broker is independent of whether the client itself
-                    // uses TLS, but we need to force the
-                    // client
-                    // to use the appropriate target broker (and port) when it
-                    // will connect back.
-                    if (log.isDebugEnabled()) {
-                        log.debug(
+                    String brokerUrl = connectWithTLS ? r.brokerUrlTls : r.brokerUrl;
+                    if (r.redirect) {
+                        // Need to try the lookup again on a different broker
+                        performLookup(clientRequestId, topic, brokerUrl, r.authoritative, numberOfRetries - 1);
+                    } else {
+                        // Reply the same address for both TLS non-TLS. The reason
+                        // is that whether we use TLS
+                        // and broker is independent of whether the client itself
+                        // uses TLS, but we need to force the
+                        // client
+                        // to use the appropriate target broker (and port) when it
+                        // will connect back.
+                        if (log.isDebugEnabled()) {
+                            log.debug(
                                 "Successfully perform lookup '{}' for topic '{}' with clientReq Id '{}' and lookup-broker {}",
                                 addr, topic, clientRequestId, brokerUrl);
-                    }
-                    proxyConnection.ctx().writeAndFlush(Commands.newLookupResponse(brokerUrl, brokerUrl, true,
+                        }
+                        proxyConnection.ctx().writeAndFlush(Commands.newLookupResponse(brokerUrl, brokerUrl, true,
                             LookupType.Connect, clientRequestId, true /* this is coming from proxy */));
+                    }
                 }
-            }).exceptionally(ex -> {
-                log.warn("[{}] Failed to lookup topic {}: {}", clientAddress, topic, ex.getMessage());
-                proxyConnection.ctx().writeAndFlush(
-                        Commands.newLookupErrorResponse(ServerError.ServiceNotReady, ex.getMessage(), clientRequestId));
-                return null;
+                proxyConnection.getConnectionPool().releaseConnection(clientCnx);
             });
         }).exceptionally(ex -> {
             // Failed to connect to backend broker
@@ -228,7 +232,7 @@ public class LookupProxyHandler {
                         log.warn("[{}] Failed to get partitioned metadata for topic {} {}", clientAddress, topicName,
                                 ex.getMessage(), ex);
                         proxyConnection.ctx().writeAndFlush(Commands.newPartitionMetadataResponse(
-                                ServerError.ServiceNotReady, ex.getMessage(), clientRequestId));
+                          getServerError(ex), ex.getMessage(), clientRequestId));
                         return null;
                     });
         } else {
@@ -252,15 +256,17 @@ public class LookupProxyHandler {
                 long requestId = proxyConnection.newRequestId();
                 ByteBuf command;
                 command = Commands.newPartitionMetadataRequest(topicName.toString(), requestId);
-                clientCnx.newLookup(command, requestId).thenAccept(lookupDataResult -> {
-                    proxyConnection.ctx().writeAndFlush(
-                            Commands.newPartitionMetadataResponse(lookupDataResult.partitions, clientRequestId));
-                }).exceptionally((ex) -> {
-                    log.warn("[{}] failed to get Partitioned metadata : {}", topicName.toString(),
-                            ex.getCause().getMessage(), ex);
-                    proxyConnection.ctx().writeAndFlush(Commands.newLookupErrorResponse(ServerError.ServiceNotReady,
-                            ex.getMessage(), clientRequestId));
-                    return null;
+                clientCnx.newLookup(command, requestId).whenComplete((r, t) -> {
+                    if (t != null) {
+                        log.warn("[{}] failed to get Partitioned metadata : {}", topicName.toString(),
+                            t.getMessage(), t);
+                        proxyConnection.ctx().writeAndFlush(Commands.newLookupErrorResponse(getServerError(t),
+                            t.getMessage(), clientRequestId));
+                    } else {
+                        proxyConnection.ctx().writeAndFlush(
+                            Commands.newPartitionMetadataResponse(r.partitions, clientRequestId));
+                    }
+                    proxyConnection.getConnectionPool().releaseConnection(clientCnx);
                 });
             }).exceptionally(ex -> {
                 // Failed to connect to backend broker
@@ -331,15 +337,18 @@ public class LookupProxyHandler {
             long requestId = proxyConnection.newRequestId();
             ByteBuf command;
             command = Commands.newGetTopicsOfNamespaceRequest(namespaceName, requestId, mode);
-            clientCnx.newGetTopicsOfNamespace(command, requestId).thenAccept(topicList ->
-                proxyConnection.ctx().writeAndFlush(
-                    Commands.newGetTopicsOfNamespaceResponse(topicList, clientRequestId))
-            ).exceptionally(ex -> {
-                log.warn("[{}] Failed to get TopicsOfNamespace {}: {}", clientAddress, namespaceName, ex.getMessage());
-                proxyConnection.ctx().writeAndFlush(
-                        Commands.newError(clientRequestId, ServerError.ServiceNotReady, ex.getMessage()));
-                return null;
+            clientCnx.newGetTopicsOfNamespace(command, requestId).whenComplete((r, t) -> {
+                if (t != null) {
+                    log.warn("[{}] Failed to get TopicsOfNamespace {}: {}", clientAddress, namespaceName, t.getMessage());
+                    proxyConnection.ctx().writeAndFlush(
+                        Commands.newError(clientRequestId, ServerError.ServiceNotReady, t.getMessage()));
+                } else {
+                    proxyConnection.ctx().writeAndFlush(
+                        Commands.newGetTopicsOfNamespaceResponse(r, clientRequestId));
+                }
             });
+
+            proxyConnection.getConnectionPool().releaseConnection(clientCnx);
         }).exceptionally(ex -> {
             // Failed to connect to backend broker
             proxyConnection.ctx().writeAndFlush(
@@ -351,7 +360,7 @@ public class LookupProxyHandler {
     public void handleGetSchema(CommandGetSchema commandGetSchema) {
         getSchemaRequests.inc();
         if (log.isDebugEnabled()) {
-            log.debug("[{}] Received GetSchema", clientAddress, commandGetSchema);
+            log.debug("[{}] Received GetSchema {}", clientAddress, commandGetSchema);
         }
 
         final long clientRequestId = commandGetSchema.getRequestId();
@@ -377,18 +386,21 @@ public class LookupProxyHandler {
             ByteBuf command;
             byte[] schemaVersion = null;
             if (commandGetSchema.hasSchemaVersion()) {
-                schemaVersion = commandGetSchema.getSchemaVersion().toByteArray();
+                schemaVersion = commandGetSchema.getSchemaVersion();
             }
             command = Commands.newGetSchema(requestId, topic,
                     Optional.ofNullable(schemaVersion).map(BytesSchemaVersion::of));
-            clientCnx.sendGetRawSchema(command, requestId).thenAccept(response -> {
-                proxyConnection.ctx().writeAndFlush(
-                        Commands.newGetSchemaResponse(clientRequestId, response));
-            }).exceptionally(ex -> {
-                log.warn("[{}] Failed to get schema {}: {}", clientAddress, topic, ex);
-                proxyConnection.ctx().writeAndFlush(
-                        Commands.newError(clientRequestId, ServerError.ServiceNotReady, ex.getMessage()));
-                return null;
+            clientCnx.sendGetRawSchema(command, requestId).whenComplete((r, t) -> {
+                if (t != null) {
+                    log.warn("[{}] Failed to get schema {}: {}", clientAddress, topic, t);
+                    proxyConnection.ctx().writeAndFlush(
+                        Commands.newError(clientRequestId, ServerError.ServiceNotReady, t.getMessage()));
+                } else {
+                    proxyConnection.ctx().writeAndFlush(
+                        Commands.newGetSchemaResponse(clientRequestId, r));
+                }
+
+                proxyConnection.getConnectionPool().releaseConnection(clientCnx);
             });
         }).exceptionally(ex -> {
             // Failed to connect to backend broker
@@ -430,6 +442,18 @@ public class LookupProxyHandler {
             return null;
         }
         return InetSocketAddress.createUnresolved(brokerURI.getHost(), brokerURI.getPort());
+    }
+
+    private ServerError getServerError(Throwable error) {
+        ServerError responseError;
+        if (error instanceof PulsarClientException.AuthorizationException) {
+            responseError = ServerError.AuthorizationError;
+        } else if (error instanceof PulsarClientException.AuthenticationException) {
+            responseError = ServerError.AuthenticationError;
+        } else {
+            responseError = ServerError.ServiceNotReady;
+        }
+        return responseError;
     }
 
     private static final Logger log = LoggerFactory.getLogger(LookupProxyHandler.class);

@@ -110,7 +110,7 @@ Possible properties might be the Git hash associated with the schema, an environ
 
 This is the `SchemaInfo` of a string.
 
-```text
+```json
 {
     "name": "test-string-schema",
     "type": "STRING",
@@ -143,6 +143,10 @@ Currently, Pulsar supports the following primitive types:
 | `BYTES` | A sequence of 8-bit unsigned bytes |
 | `STRING` | A Unicode character sequence |
 | `TIMESTAMP` (`DATE`, `TIME`) |  A logic type represents a specific instant in time with millisecond precision. <br>It stores the number of milliseconds since `January 1, 1970, 00:00:00 GMT` as an `INT64` value | 
+| INSTANT | A single instantaneous point on the time-line with nanoseconds precision|
+| LOCAL_DATE | An immutable date-time object that represents a date, often viewed as year-month-day|
+| LOCAL_TIME | An immutable date-time object that represents a time, often viewed as hour-minute-second. Time is represented to nanosecond precision.|
+| LOCAL_DATE_TIME | An immutable date-time object that represents a date-time, often viewed as year-month-day-hour-minute-second |
 
 For primitive types, Pulsar does not store any schema data in `SchemaInfo`. The `type` in `SchemaInfo` is used to determine how to serialize and deserialize the data. 
 
@@ -164,6 +168,10 @@ The conversions between **Pulsar schema types** and **language-specific primitiv
 | TIMESTAMP | java.sql.Timestamp | | |
 | TIME | java.sql.Time | | |
 | DATE | java.util.Date | | |
+| INSTANT | java.time.Instant | | |
+| LOCAL_DATE | java.time.LocalDate | | |
+| LOCAL_TIME | java.time.LocalDateTime | |
+| LOCAL_DATE_TIME | java.time.LocalTime | |
 
 **Example**
 
@@ -171,15 +179,15 @@ This example demonstrates how to use a string schema.
 
 1. Create a producer with a string schema and send messages.
 
-    ```text
+    ```java
     Producer<String> producer = client.newProducer(Schema.STRING).create();
     producer.newMessage().value("Hello Pulsar!").send();
     ```
 
 2. Create a consumer with a string schema and receive messages.  
 
-    ```text
-    Consumer<String> consumer = client.newConsumer(Schema.STRING).create();
+    ```java
+    Consumer<String> consumer = client.newConsumer(Schema.STRING).subscribe();
     consumer.receive();
     ```
 
@@ -190,7 +198,7 @@ Currently, Pulsar supports the following complex types:
 | Complex Type | Description |
 |---|---|
 | `keyvalue` | Represents a complex type of a key/value pair. |
-| `struct` | Supports **AVRO**, **JSON**, and **Protobuf**. |
+| `struct` | Handles structured data. It supports `AvroBaseStructSchema` and `ProtobufNativeSchema`. |
 
 #### keyvalue
 
@@ -198,21 +206,23 @@ Currently, Pulsar supports the following complex types:
 
 For `SchemaInfo` of `keyvalue` schema, Pulsar stores the `SchemaInfo` of key schema and the `SchemaInfo` of value schema together.
 
-Pulsar provides two methods to encode a key/value pair in messages：
+Pulsar provides the following methods to encode a key/value pair in messages：
 
 * `INLINE`
 
 * `SEPARATED`
 
-Users can choose the encoding type when constructing the key/value schema.
+You can choose the encoding type when constructing the key/value schema.
 
-##### INLINE
+<!--DOCUSAURUS_CODE_TABS-->
 
-Key/value pairs will be encoded together in the message payload.
+<!--INLINE-->
 
-##### SEPARATED
+Key/value pairs are encoded together in the message payload.
 
-Key will be encoded in the message key and the value will be encoded in the message payload. 
+<!--SEPARATED-->
+
+Key is encoded in the message key and the value is encoded in the message payload. 
   
 **Example**
     
@@ -220,7 +230,7 @@ This example shows how to construct a key/value schema and then use it to produc
 
 1. Construct a key/value schema with `INLINE` encoding type.
 
-    ```text
+    ```java
     Schema<KeyValue<Integer, String>> kvSchema = Schema.KeyValue(
     Schema.INT32,
     Schema.STRING,
@@ -230,7 +240,7 @@ This example shows how to construct a key/value schema and then use it to produc
 
 2. Optionally, construct a key/value schema with `SEPARATED` encoding type.
 
-    ```text
+    ```java
     Schema<KeyValue<Integer, String>> kvSchema = Schema.KeyValue(
     Schema.INT32,
     Schema.STRING,
@@ -240,7 +250,7 @@ This example shows how to construct a key/value schema and then use it to produc
 
 3. Produce messages using a key/value schema.
 
-    ```text
+    ```java
     Schema<KeyValue<Integer, String>> kvSchema = Schema.KeyValue(
     Schema.INT32,
     Schema.STRING,
@@ -262,7 +272,7 @@ This example shows how to construct a key/value schema and then use it to produc
 
 4. Consume messages using a key/value schema.
 
-    ```
+    ```java
     Schema<KeyValue<Integer, String>> kvSchema = Schema.KeyValue(
     Schema.INT32,
     Schema.STRING,
@@ -279,25 +289,36 @@ This example shows how to construct a key/value schema and then use it to produc
     KeyValue<Integer, String> kv = msg.getValue();
     ```
 
+<!--END_DOCUSAURUS_CODE_TABS-->
+
 #### struct
 
-Pulsar uses [Avro Specification](http://avro.apache.org/docs/current/spec.html) to declare the schema definition for `struct` schema. 
+This section describes the details of type and usage of the `struct` schema.
 
-This allows Pulsar:
+##### Type
 
-* to use same tools to manage schema definitions
+`struct` schema supports `AvroBaseStructSchema` and `ProtobufNativeSchema`.
 
-* to use different serialization/deserialization methods to handle data
+|Type|Description|
+---|---|
+`AvroBaseStructSchema`|Pulsar uses [Avro Specification](http://avro.apache.org/docs/current/spec.html) to declare the schema definition for `AvroBaseStructSchema`, which supports  `AvroSchema`, `JsonSchema`, and `ProtobufSchema`. <br><br>This allows Pulsar:<br>- to use the same tools to manage schema definitions<br>- to use different serialization or deserialization methods to handle data|
+`ProtobufNativeSchema`|`ProtobufNativeSchema` is based on protobuf native Descriptor. <br><br>This allows Pulsar:<br>- to use native protobuf-v3 to serialize or deserialize data<br>- to use `AutoConsume` to deserialize data.
 
-There are two methods to use `struct` schema：
+##### Usage
+
+Pulsar provides the following methods to use the `struct` schema:
 
 * `static`
 
 * `generic`
 
-##### static
+* `SchemaDefinition`
 
-You can predefine the `struct` schema, and it can be a POJO in Java, a `struct` in Go, or classes generated by Avro or Protobuf tools. 
+<!--DOCUSAURUS_CODE_TABS-->
+
+<!--static-->
+
+You can predefine the `struct` schema, which can be a POJO in Java, a `struct` in Go, or classes generated by Avro or Protobuf tools. 
 
 **Example** 
 
@@ -305,7 +326,7 @@ Pulsar gets the schema definition from the predefined `struct` using an Avro lib
 
 1. Create the _User_ class to define the messages sent to Pulsar topics.
 
-    ```text
+    ```java
     public class User {
         String name;
         int age;
@@ -314,19 +335,19 @@ Pulsar gets the schema definition from the predefined `struct` using an Avro lib
 
 2. Create a producer with a `struct` schema and send messages.
 
-    ```text
+    ```java
     Producer<User> producer = client.newProducer(Schema.AVRO(User.class)).create();
     producer.newMessage().value(User.builder().userName("pulsar-user").userId(1L).build()).send();
     ```
 
 3. Create a consumer with a `struct` schema and receive messages
 
-    ```text
-    Consumer<User> consumer = client.newConsumer(Schema.AVRO(User.class)).create();
+    ```java
+    Consumer<User> consumer = client.newConsumer(Schema.AVRO(User.class)).subscribe();
     User user = consumer.receive();
     ```
 
-##### generic
+<!--generic-->
 
 Sometimes applications do not have pre-defined structs, and you can use this method to define schema and access data.
 
@@ -336,7 +357,7 @@ You can define the `struct` schema using the `GenericSchemaBuilder`, generate a 
 
 1. Use `RecordSchemaBuilder` to build a schema.
 
-    ```text
+    ```java
     RecordSchemaBuilder recordSchemaBuilder = SchemaBuilder.record("schemaName");
     recordSchemaBuilder.field("intField").type(SchemaType.INT32);
     SchemaInfo schemaInfo = recordSchemaBuilder.build(SchemaType.AVRO);
@@ -346,11 +367,44 @@ You can define the `struct` schema using the `GenericSchemaBuilder`, generate a 
 
 2. Use `RecordBuilder` to build the struct records.
 
-    ```text
+    ```java
     producer.newMessage().value(schema.newRecordBuilder()
                 .set("intField", 32)
                 .build()).send();
     ```
+
+<!--SchemaDefinition-->
+
+You can define the `schemaDefinition` to generate a `struct` schema.
+
+**Example** 
+
+1. Create the _User_ class to define the messages sent to Pulsar topics.
+
+    ```java
+    public class User {
+        String name;
+        int age;
+    }
+    ```
+
+2. Create a producer with a `SchemaDefinition` and send messages.
+
+    ```java
+    SchemaDefinition<User> schemaDefinition =   SchemaDefinition.builder().withPojo(User.class).build();
+    Producer<User> producer = client.newProducer(schemaDefinition).create();
+    producer.newMessage().value(User.builder().userName("pulsar-user").userId(1L).build()).send();
+    ```
+
+3. Create a consumer with a `SchemaDefinition` schema and receive messages
+
+    ```java
+    SchemaDefinition<User> schemaDefinition = SchemaDefinition.builder().withPojo(User.class).build();
+    Consumer<User> consumer = client.newConsumer(schemaDefinition).subscribe();
+    User user = consumer.receive();
+    ```
+
+<!--END_DOCUSAURUS_CODE_TABS-->
 
 ### Auto Schema
 
@@ -377,7 +431,7 @@ Suppose that:
    
 In this case, you can use `AUTO_PRODUCE` to verify whether the bytes produced by _K_ can be sent to _P_ or not.
 
-```text
+```java
 Produce<byte[]> pulsarProducer = client.newProducer(Schema.AUTO_PRODUCE())
     …
     .create();
@@ -391,7 +445,7 @@ pulsarProducer.produce(kafkaMessageBytes);
 
 `AUTO_CONSUME` schema helps a Pulsar topic validate whether the bytes sent by a Pulsar topic is compatible with a consumer, that is, the Pulsar topic deserializes messages into language-specific objects using the `SchemaInfo` retrieved from broker-side. 
 
-Currently, `AUTO_CONSUME` only supports **AVRO** and **JSON** schemas. It deserializes messages into `GenericRecord`.
+Currently, `AUTO_CONSUME` supports AVRO, JSON and ProtobufNativeSchema schemas. It deserializes messages into `GenericRecord`.
 
 **Example**
 
@@ -405,14 +459,13 @@ Suppose that:
    
 In this case, you can use `AUTO_CONSUME` to verify whether the bytes produced by _P_ can be sent to MySQL or not.
 
-```text
+```java
 Consumer<GenericRecord> pulsarConsumer = client.newConsumer(Schema.AUTO_CONSUME())
     …
     .subscribe();
 
 Message<GenericRecord> msg = consumer.receive() ; 
 GenericRecord record = msg.getValue();
-…
 ```
 
 ## Schema version
@@ -431,7 +484,7 @@ The following example illustrates how the schema version works.
 
 Suppose that a Pulsar [Java client](client-libraries-java.md) created using the code below attempts to connect to Pulsar and begins to send messages:
 
-```text
+```java
 PulsarClient client = PulsarClient.builder()
         .serviceUrl("pulsar://localhost:6650")
         .build();

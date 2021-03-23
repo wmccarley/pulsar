@@ -52,6 +52,7 @@ import com.google.common.collect.Sets;
 
 import io.netty.util.concurrent.DefaultThreadFactory;
 
+@Test(groups = "broker-impl")
 public class MessageRedeliveryTest extends ProducerConsumerBase {
     private static final Logger log = LoggerFactory.getLogger(MessageRedeliveryTest.class);
 
@@ -62,7 +63,7 @@ public class MessageRedeliveryTest extends ProducerConsumerBase {
         super.producerBaseSetup();
     }
 
-    @AfterMethod
+    @AfterMethod(alwaysRun = true)
     @Override
     protected void cleanup() throws Exception {
         super.internalCleanup();

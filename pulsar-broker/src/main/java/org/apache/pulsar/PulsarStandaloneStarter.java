@@ -19,17 +19,13 @@
 package org.apache.pulsar;
 
 import static org.apache.commons.lang3.StringUtils.isBlank;
-
+import com.beust.jcommander.JCommander;
 import java.io.FileInputStream;
 import java.util.Arrays;
-
 import org.apache.pulsar.broker.ServiceConfiguration;
-import org.apache.pulsar.broker.ServiceConfigurationUtils;
 import org.apache.pulsar.common.configuration.PulsarConfigurationLoader;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import com.beust.jcommander.JCommander;
 
 public class PulsarStandaloneStarter extends PulsarStandalone {
 
@@ -57,7 +53,10 @@ public class PulsarStandaloneStarter extends PulsarStandalone {
             return;
         }
 
-        this.config = PulsarConfigurationLoader.create((new FileInputStream(this.getConfigFile())), ServiceConfiguration.class);
+        try (FileInputStream inputStream = new FileInputStream(this.getConfigFile())) {
+            this.config = PulsarConfigurationLoader.create(
+                    inputStream, ServiceConfiguration.class);
+        }
 
         String zkServers = "127.0.0.1";
 
@@ -67,14 +66,14 @@ public class PulsarStandaloneStarter extends PulsarStandalone {
             zkServers = this.getAdvertisedAddress();
         } else if (isBlank(config.getAdvertisedAddress())) {
             // Use advertised address as local hostname
-            config.setAdvertisedAddress(ServiceConfigurationUtils.unsafeLocalhostResolve());
+            config.setAdvertisedAddress("localhost");
         } else {
             // Use advertised address from config file
         }
 
         // Set ZK server's host to localhost
         // Priority: args > conf > default
-        if (argsContains(args,"--zookeeper-port")) {
+        if (argsContains(args, "--zookeeper-port")) {
             config.setZookeeperServers(zkServers + ":" + this.getZkPort());
             config.setConfigurationStoreServers(zkServers + ":" + this.getZkPort());
         } else {
@@ -102,7 +101,7 @@ public class PulsarStandaloneStarter extends PulsarStandalone {
                         bkEnsemble.stop();
                     }
                 } catch (Exception e) {
-                    log.error("Shutdown failed: {}", e.getMessage());
+                    log.error("Shutdown failed: {}", e.getMessage(), e);
                 }
             }
         });

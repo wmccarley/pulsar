@@ -24,18 +24,18 @@ import static java.lang.Math.min;
 import static org.apache.bookkeeper.mledger.util.Errors.isNoSuchLedgerExistsException;
 import static org.apache.bookkeeper.mledger.util.SafeRun.safeRun;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.BoundType;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Queues;
 import com.google.common.collect.Range;
-
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.util.Recycler;
 import io.netty.util.Recycler.Handle;
-
+import io.netty.util.ReferenceCountUtil;
 import java.time.Clock;
 import java.util.Collections;
 import java.util.HashMap;
@@ -43,11 +43,11 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.NavigableMap;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Queue;
 import java.util.Random;
 import java.util.UUID;
-import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentLinkedDeque;
@@ -64,8 +64,9 @@ import java.util.concurrent.atomic.AtomicLongFieldUpdater;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
 import java.util.function.Predicate;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
-
+import org.apache.bookkeeper.client.AsyncCallback;
 import org.apache.bookkeeper.client.AsyncCallback.CreateCallback;
 import org.apache.bookkeeper.client.AsyncCallback.OpenCallback;
 import org.apache.bookkeeper.client.BKException;
@@ -78,24 +79,29 @@ import org.apache.bookkeeper.common.util.Backoff;
 import org.apache.bookkeeper.common.util.OrderedExecutor;
 import org.apache.bookkeeper.common.util.OrderedScheduler;
 import org.apache.bookkeeper.common.util.Retries;
+import org.apache.bookkeeper.mledger.AsyncCallbacks;
 import org.apache.bookkeeper.mledger.AsyncCallbacks.AddEntryCallback;
 import org.apache.bookkeeper.mledger.AsyncCallbacks.CloseCallback;
 import org.apache.bookkeeper.mledger.AsyncCallbacks.DeleteCursorCallback;
 import org.apache.bookkeeper.mledger.AsyncCallbacks.DeleteLedgerCallback;
+import org.apache.bookkeeper.mledger.AsyncCallbacks.MarkDeleteCallback;
 import org.apache.bookkeeper.mledger.AsyncCallbacks.OffloadCallback;
 import org.apache.bookkeeper.mledger.AsyncCallbacks.OpenCursorCallback;
 import org.apache.bookkeeper.mledger.AsyncCallbacks.ReadEntriesCallback;
 import org.apache.bookkeeper.mledger.AsyncCallbacks.ReadEntryCallback;
 import org.apache.bookkeeper.mledger.AsyncCallbacks.TerminateCallback;
+import org.apache.bookkeeper.mledger.AsyncCallbacks.UpdatePropertiesCallback;
 import org.apache.bookkeeper.mledger.Entry;
 import org.apache.bookkeeper.mledger.ManagedCursor;
 import org.apache.bookkeeper.mledger.ManagedLedger;
 import org.apache.bookkeeper.mledger.ManagedLedgerConfig;
 import org.apache.bookkeeper.mledger.ManagedLedgerException;
 import org.apache.bookkeeper.mledger.ManagedLedgerException.BadVersionException;
+import org.apache.bookkeeper.mledger.ManagedLedgerException.CursorNotFoundException;
 import org.apache.bookkeeper.mledger.ManagedLedgerException.InvalidCursorPositionException;
 import org.apache.bookkeeper.mledger.ManagedLedgerException.ManagedLedgerAlreadyClosedException;
 import org.apache.bookkeeper.mledger.ManagedLedgerException.ManagedLedgerFencedException;
+import org.apache.bookkeeper.mledger.ManagedLedgerException.ManagedLedgerInterceptException;
 import org.apache.bookkeeper.mledger.ManagedLedgerException.ManagedLedgerNotFoundException;
 import org.apache.bookkeeper.mledger.ManagedLedgerException.ManagedLedgerTerminatedException;
 import org.apache.bookkeeper.mledger.ManagedLedgerException.MetaStoreException;
@@ -104,10 +110,12 @@ import org.apache.bookkeeper.mledger.ManagedLedgerException.NonRecoverableLedger
 import org.apache.bookkeeper.mledger.ManagedLedgerException.TooManyRequestsException;
 import org.apache.bookkeeper.mledger.ManagedLedgerMXBean;
 import org.apache.bookkeeper.mledger.Position;
+import org.apache.bookkeeper.mledger.WaitingEntryCallBack;
 import org.apache.bookkeeper.mledger.impl.ManagedCursorImpl.VoidCallback;
 import org.apache.bookkeeper.mledger.impl.MetaStore.MetaStoreCallback;
-import org.apache.bookkeeper.mledger.impl.MetaStore.Stat;
+import org.apache.bookkeeper.mledger.intercept.ManagedLedgerInterceptor;
 import org.apache.bookkeeper.mledger.offload.OffloadUtils;
+import org.apache.bookkeeper.mledger.proto.MLDataFormats;
 import org.apache.bookkeeper.mledger.proto.MLDataFormats.ManagedLedgerInfo;
 import org.apache.bookkeeper.mledger.proto.MLDataFormats.ManagedLedgerInfo.LedgerInfo;
 import org.apache.bookkeeper.mledger.proto.MLDataFormats.NestedPositionInfo;
@@ -115,8 +123,11 @@ import org.apache.bookkeeper.mledger.proto.MLDataFormats.OffloadContext;
 import org.apache.bookkeeper.mledger.util.CallbackMutex;
 import org.apache.bookkeeper.mledger.util.Futures;
 import org.apache.commons.lang3.tuple.Pair;
-import org.apache.pulsar.common.api.proto.PulsarApi.CommandSubscribe.InitialPosition;
+import org.apache.pulsar.common.api.proto.CommandSubscribe.InitialPosition;
+import org.apache.pulsar.common.policies.data.EnsemblePlacementPolicyConfig;
+import org.apache.pulsar.common.policies.data.OffloadPolicies.OffloadedReadPriority;
 import org.apache.pulsar.common.util.collections.ConcurrentLongHashMap;
+import org.apache.pulsar.metadata.api.Stat;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -131,6 +142,7 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
     private final BookKeeper.DigestType digestType;
 
     protected ManagedLedgerConfig config;
+    protected Map<String, String> propertiesMap;
     protected final MetaStore store;
 
     private final ConcurrentLongHashMap<CompletableFuture<ReadHandle>> ledgerCache = new ConcurrentLongHashMap<>(
@@ -142,6 +154,7 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
     private final ManagedCursorContainer activeCursors = new ManagedCursorContainer();
 
     // Ever increasing counter of entries added
+    @VisibleForTesting
     static final AtomicLongFieldUpdater<ManagedLedgerImpl> ENTRIES_ADDED_COUNTER_UPDATER = AtomicLongFieldUpdater
             .newUpdater(ManagedLedgerImpl.class, "entriesAddedCounter");
     @SuppressWarnings("unused")
@@ -159,6 +172,9 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
     // Cursors that are waiting to be notified when new entries are persisted
     final ConcurrentLinkedQueue<ManagedCursorImpl> waitingCursors;
 
+    // Objects that are waiting to be notified when new entries are persisted
+    final ConcurrentLinkedQueue<WaitingEntryCallBack> waitingEntryCallBacks;
+
     // This map is used for concurrent open cursor requests, where the 2nd request will attach a listener to the
     // uninitialized cursor future from the 1st request
     final Map<String, CompletableFuture<ManagedCursor>> uninitializedCursors;
@@ -166,12 +182,13 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
     final EntryCache entryCache;
 
     private ScheduledFuture<?> timeoutTask;
+    private ScheduledFuture<?> checkLedgerRollTask;
 
     /**
-     * This lock is held while the ledgers list is updated asynchronously on the metadata store. Since we use the store
+     * This lock is held while the ledgers list or propertiesMap is updated asynchronously on the metadata store. Since we use the store
      * version, we cannot have multiple concurrent updates.
      */
-    private final CallbackMutex ledgersListMutex = new CallbackMutex();
+    private final CallbackMutex metadataMutex = new CallbackMutex();
     private final CallbackMutex trimmerMutex = new CallbackMutex();
 
     private final CallbackMutex offloadMutex = new CallbackMutex();
@@ -185,9 +202,12 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
     private long lastLedgerCreationInitiationTimestamp = 0;
 
     private static final Random random = new Random(System.currentTimeMillis());
-    private long maximumRolloverTimeMs;
+    private final long maximumRolloverTimeMs;
+    protected final Supplier<Boolean> mlOwnershipChecker;
 
     volatile PositionImpl lastConfirmedEntry;
+
+    private ManagedLedgerInterceptor managedLedgerInterceptor;
 
     protected static final int DEFAULT_LEDGER_DELETE_RETRIES = 3;
     protected static final int DEFAULT_LEDGER_DELETE_BACKOFF_TIME_SEC = 60;
@@ -232,8 +252,6 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
             .newUpdater(ManagedLedgerImpl.class, "addOpCount");
     private volatile long addOpCount = 0;
 
-    private final long backloggedCursorThresholdEntries;
-
     // last read-operation's callback to check read-timeout on it.
     private volatile ReadEntryCallbackWrapper lastReadCallback = null;
     private static final AtomicReferenceFieldUpdater<ManagedLedgerImpl, ReadEntryCallbackWrapper> LAST_READ_CALLBACK_UPDATER = AtomicReferenceFieldUpdater
@@ -245,11 +263,21 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
      */
     final ConcurrentLinkedQueue<OpAddEntry> pendingAddEntries = new ConcurrentLinkedQueue<>();
 
-    // //////////////////////////////////////////////////////////////////////
+    /**
+     * This variable is used for testing the tests
+     * {@link ManagedLedgerTest#testManagedLedgerWithPlacementPolicyInCustomMetadata()}
+     */
+    @VisibleForTesting
+    Map<String, byte[]> createdLedgerCustomMetadata;
 
     public ManagedLedgerImpl(ManagedLedgerFactoryImpl factory, BookKeeper bookKeeper, MetaStore store,
             ManagedLedgerConfig config, OrderedScheduler scheduledExecutor, OrderedExecutor orderedExecutor,
             final String name) {
+        this(factory, bookKeeper, store, config, scheduledExecutor, orderedExecutor, name, null);
+    }
+    public ManagedLedgerImpl(ManagedLedgerFactoryImpl factory, BookKeeper bookKeeper, MetaStore store,
+            ManagedLedgerConfig config, OrderedScheduler scheduledExecutor, OrderedExecutor orderedExecutor,
+            final String name, final Supplier<Boolean> mlOwnershipChecker) {
         this.factory = factory;
         this.bookKeeper = bookKeeper;
         this.config = config;
@@ -267,12 +295,17 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
         this.mbean = new ManagedLedgerMBeanImpl(this);
         this.entryCache = factory.getEntryCacheManager().getEntryCache(this);
         this.waitingCursors = Queues.newConcurrentLinkedQueue();
+        this.waitingEntryCallBacks = Queues.newConcurrentLinkedQueue();
         this.uninitializedCursors = Maps.newHashMap();
         this.clock = config.getClock();
-        this.backloggedCursorThresholdEntries = factory.getConfig().getThresholdBackloggedCursor();
 
         // Get the next rollover time. Add a random value upto 5% to avoid rollover multiple ledgers at the same time
         this.maximumRolloverTimeMs = (long) (config.getMaximumRolloverTimeMs() * (1 + random.nextDouble() * 5 / 100.0));
+        this.mlOwnershipChecker = mlOwnershipChecker;
+        this.propertiesMap = Maps.newHashMap();
+        if (config.getManagedLedgerInterceptor() != null) {
+            this.managedLedgerInterceptor = config.getManagedLedgerInterceptor();
+        }
     }
 
     synchronized void initialize(final ManagedLedgerInitializeLedgerCallback callback, final Object ctx) {
@@ -293,6 +326,17 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
                     ledgers.put(ls.getLedgerId(), ls);
                 }
 
+                if (mlInfo.getPropertiesCount() > 0) {
+                    propertiesMap = Maps.newHashMap();
+                    for (int i = 0; i < mlInfo.getPropertiesCount(); i++) {
+                        MLDataFormats.KeyValue property = mlInfo.getProperties(i);
+                        propertiesMap.put(property.getKey(), property.getValue());
+                    }
+                }
+                if (managedLedgerInterceptor != null) {
+                    managedLedgerInterceptor.onManagedLedgerPropertiesInitialize(propertiesMap);
+                }
+
                 // Last ledger stat may be zeroed, we must update it
                 if (ledgers.size() > 0) {
                     final long id = ledgers.lastKey();
@@ -300,13 +344,16 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
                         executor.executeOrdered(name, safeRun(() -> {
                             mbean.endDataLedgerOpenOp();
                             if (log.isDebugEnabled()) {
-                                log.debug("[{}] Opened ledger {}: ", name, id, BKException.getMessage(rc));
+                                log.debug("[{}] Opened ledger {}: {}", name, id, BKException.getMessage(rc));
                             }
                             if (rc == BKException.Code.OK) {
                                 LedgerInfo info = LedgerInfo.newBuilder().setLedgerId(id)
                                         .setEntries(lh.getLastAddConfirmed() + 1).setSize(lh.getLength())
                                         .setTimestamp(clock.millis()).build();
                                 ledgers.put(id, info);
+                                if (managedLedgerInterceptor != null) {
+                                    managedLedgerInterceptor.onManagedLedgerLastLedgerInitialize(name, lh);
+                                }
                                 initializeBookKeeper(callback);
                             } else if (isNoSuchLedgerExistsException(rc)) {
                                 log.warn("[{}] Ledger not found: {}", name, ledgers.lastKey());
@@ -321,7 +368,7 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
                     };
 
                     if (log.isDebugEnabled()) {
-                        log.debug("[{}] Opening legder {}", name, id);
+                        log.debug("[{}] Opening ledger {}", name, id);
                     }
                     mbean.startDataLedgerOpenOp();
                     bookKeeper.asyncOpenLedger(id, digestType, config.getPassword(), opencb, null);
@@ -341,6 +388,8 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
         });
 
         scheduleTimeoutTask();
+
+        scheduleRollOverLedgerTask();
     }
 
     private synchronized void initializeBookKeeper(final ManagedLedgerInitializeLedgerCallback callback) {
@@ -387,7 +436,7 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
         };
 
         // Create a new ledger to start writing
-        this.lastLedgerCreationInitiationTimestamp = System.nanoTime();
+        this.lastLedgerCreationInitiationTimestamp = System.currentTimeMillis();
         mbean.startDataLedgerCreateOp();
 
         asyncCreateLedger(bookKeeper, config, digestType, (rc, lh, ctx) -> {
@@ -447,34 +496,70 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
                     return;
                 }
 
-                for (final String cursorName : consumers) {
-                    if (log.isDebugEnabled()) {
-                        log.debug("[{}] Loading cursor {}", name, cursorName);
-                    }
-                    final ManagedCursorImpl cursor;
-                    cursor = new ManagedCursorImpl(bookKeeper, config, ManagedLedgerImpl.this, cursorName);
+                if (!ManagedLedgerImpl.this.config.isLazyCursorRecovery()) {
+                    log.debug("[{}] Loading cursors", name);
 
-                    cursor.recover(new VoidCallback() {
-                        @Override
-                        public void operationComplete() {
-                            log.info("[{}] Recovery for cursor {} completed. pos={} -- todo={}", name, cursorName,
-                                    cursor.getMarkDeletedPosition(), cursorCount.get() - 1);
-                            cursor.setActive();
-                            cursors.add(cursor);
+                    for (final String cursorName : consumers) {
+                        log.info("[{}] Loading cursor {}", name, cursorName);
+                        final ManagedCursorImpl cursor;
+                        cursor = new ManagedCursorImpl(bookKeeper, config, ManagedLedgerImpl.this, cursorName);
 
-                            if (cursorCount.decrementAndGet() == 0) {
-                                // The initialization is now completed, register the jmx mbean
-                                callback.initializeComplete();
+                        cursor.recover(new VoidCallback() {
+                            @Override
+                            public void operationComplete() {
+                                log.info("[{}] Recovery for cursor {} completed. pos={} -- todo={}", name, cursorName,
+                                        cursor.getMarkDeletedPosition(), cursorCount.get() - 1);
+                                cursor.setActive();
+                                cursors.add(cursor);
+
+                                if (cursorCount.decrementAndGet() == 0) {
+                                    // The initialization is now completed, register the jmx mbean
+                                    callback.initializeComplete();
+                                }
                             }
-                        }
 
-                        @Override
-                        public void operationFailed(ManagedLedgerException exception) {
-                            log.warn("[{}] Recovery for cursor {} failed", name, cursorName, exception);
-                            cursorCount.set(-1);
-                            callback.initializeFailed(exception);
+                            @Override
+                            public void operationFailed(ManagedLedgerException exception) {
+                                log.warn("[{}] Recovery for cursor {} failed", name, cursorName, exception);
+                                cursorCount.set(-1);
+                                callback.initializeFailed(exception);
+                            }
+                        });
+                    }
+                } else {
+                    // Lazily recover cursors by put them to uninitializedCursors map.
+                    for (final String cursorName : consumers) {
+                        if (log.isDebugEnabled()) {
+                            log.debug("[{}] Recovering cursor {} lazily" , name, cursorName);
                         }
-                    });
+                        final ManagedCursorImpl cursor;
+                        cursor = new ManagedCursorImpl(bookKeeper, config, ManagedLedgerImpl.this, cursorName);
+                        CompletableFuture<ManagedCursor> cursorRecoveryFuture = new CompletableFuture<>();
+                        uninitializedCursors.put(cursorName, cursorRecoveryFuture);
+
+                        cursor.recover(new VoidCallback() {
+                            @Override
+                            public void operationComplete() {
+                                log.info("[{}] Lazy recovery for cursor {} completed. pos={} -- todo={}", name, cursorName,
+                                        cursor.getMarkDeletedPosition(), cursorCount.get() - 1);
+                                cursor.setActive();
+                                synchronized (ManagedLedgerImpl.this) {
+                                    cursors.add(cursor);
+                                    uninitializedCursors.remove(cursor.getName()).complete(cursor);
+                                }
+                            }
+
+                            @Override
+                            public void operationFailed(ManagedLedgerException exception) {
+                                log.warn("[{}] Lazy recovery for cursor {} failed", name, cursorName, exception);
+                                synchronized (ManagedLedgerImpl.this) {
+                                    uninitializedCursors.remove(cursor.getName()).completeExceptionally(exception);
+                                }
+                            }
+                        });
+                    }
+                    // Complete ledger recovery.
+                    callback.initializeComplete();
                 }
             }
 
@@ -497,6 +582,11 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
     }
 
     @Override
+    public Position addEntry(byte[] data, int numberOfMessages) throws InterruptedException, ManagedLedgerException {
+        return addEntry(data, numberOfMessages, 0, data.length);
+    }
+
+    @Override
     public Position addEntry(byte[] data, int offset, int length) throws InterruptedException, ManagedLedgerException {
         final CountDownLatch counter = new CountDownLatch(1);
         // Result list will contain the status exception and the resulting
@@ -509,7 +599,42 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
 
         asyncAddEntry(data, offset, length, new AddEntryCallback() {
             @Override
-            public void addComplete(Position position, Object ctx) {
+            public void addComplete(Position position, ByteBuf entryData, Object ctx) {
+                result.position = position;
+                counter.countDown();
+            }
+
+            @Override
+            public void addFailed(ManagedLedgerException exception, Object ctx) {
+                result.status = exception;
+                counter.countDown();
+            }
+        }, null);
+
+        counter.await();
+
+        if (result.status != null) {
+            log.error("[{}] Error adding entry", name, result.status);
+            throw result.status;
+        }
+
+        return result.position;
+    }
+
+    @Override
+    public Position addEntry(byte[] data, int numberOfMessages, int offset, int length) throws InterruptedException, ManagedLedgerException {
+        final CountDownLatch counter = new CountDownLatch(1);
+        // Result list will contain the status exception and the resulting
+        // position
+        class Result {
+            ManagedLedgerException status = null;
+            Position position = null;
+        }
+        final Result result = new Result();
+
+        asyncAddEntry(data, numberOfMessages, offset, length, new AddEntryCallback() {
+            @Override
+            public void addComplete(Position position, ByteBuf entryData, Object ctx) {
                 result.position = position;
                 counter.countDown();
             }
@@ -544,6 +669,13 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
     }
 
     @Override
+    public void asyncAddEntry(final byte[] data, int numberOfMessages, int offset, int length, final AddEntryCallback callback,
+                              final Object ctx) {
+        ByteBuf buffer = Unpooled.wrappedBuffer(data, offset, length);
+        asyncAddEntry(buffer, numberOfMessages, callback, ctx);
+    }
+
+    @Override
     public void asyncAddEntry(ByteBuf buffer, AddEntryCallback callback, Object ctx) {
         if (log.isDebugEnabled()) {
             log.debug("[{}] asyncAddEntry size={} state={}", name, buffer.readableBytes(), state);
@@ -552,14 +684,23 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
         OpAddEntry addOperation = OpAddEntry.create(this, buffer, callback, ctx);
 
         // Jump to specific thread to avoid contention from writers writing from different threads
-        executor.executeOrdered(name, safeRun(() -> {
-            pendingAddEntries.add(addOperation);
+        executor.executeOrdered(name, safeRun(() -> internalAsyncAddEntry(addOperation)));
+    }
 
-            internalAsyncAddEntry(addOperation);
-        }));
+    @Override
+    public void asyncAddEntry(ByteBuf buffer, int numberOfMessages, AddEntryCallback callback, Object ctx) {
+        if (log.isDebugEnabled()) {
+            log.debug("[{}] asyncAddEntry size={} state={}", name, buffer.readableBytes(), state);
+        }
+
+        OpAddEntry addOperation = OpAddEntry.create(this, buffer, numberOfMessages, callback, ctx);
+
+        // Jump to specific thread to avoid contention from writers writing from different threads
+        executor.executeOrdered(name, safeRun(() -> internalAsyncAddEntry(addOperation)));
     }
 
     private synchronized void internalAsyncAddEntry(OpAddEntry addOperation) {
+        pendingAddEntries.add(addOperation);
         final State state = STATE_UPDATER.get(this);
         if (state == State.Fenced) {
             addOperation.failed(new ManagedLedgerFencedException());
@@ -582,13 +723,20 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
             if (log.isDebugEnabled()) {
                 log.debug("[{}] Queue addEntry request", name);
             }
+            if (State.CreatingLedger == state) {
+                long elapsedMs = System.currentTimeMillis() - this.lastLedgerCreationInitiationTimestamp;
+                if (elapsedMs > TimeUnit.SECONDS.toMillis(2 * config.getMetadataOperationsTimeoutSeconds())) {
+                    log.info("[{}] Ledger creation was initiated {} ms ago but it never completed" +
+                        " and creation timeout task didn't kick in as well. Force to fail the create ledger operation.",
+                            name, elapsedMs);
+                    this.createComplete(Code.TimeoutException, null, null);
+                }
+            }
         } else if (state == State.ClosedLedger) {
             // No ledger and no pending operations. Create a new ledger
-            if (log.isDebugEnabled()) {
-                log.debug("[{}] Creating a new ledger", name);
-            }
+            log.info("[{}] Creating a new ledger", name);
             if (STATE_UPDATER.compareAndSet(this, State.ClosedLedger, State.CreatingLedger)) {
-                this.lastLedgerCreationInitiationTimestamp = System.nanoTime();
+                this.lastLedgerCreationInitiationTimestamp = System.currentTimeMillis();
                 mbean.startDataLedgerCreateOp();
                 asyncCreateLedger(bookKeeper, config, digestType, this, Collections.emptyMap());
             }
@@ -614,8 +762,27 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
                 addOperation.setCloseWhenDone(true);
                 STATE_UPDATER.set(this, State.ClosingLedger);
             }
+            // interceptor entry before add to bookie
+            if (beforeAddEntry(addOperation)) {
+                addOperation.initiate();
+            }
+        }
+    }
 
-            addOperation.initiate();
+    private boolean beforeAddEntry(OpAddEntry addOperation) {
+        // if no interceptor, just return true to make sure addOperation will be initiate()
+        if (managedLedgerInterceptor == null) {
+            return true;
+        }
+        try {
+            managedLedgerInterceptor.beforeAddEntry(addOperation, addOperation.getNumberOfMessages());
+            return true;
+        } catch (Exception e) {
+            addOperation.failed(
+                    new ManagedLedgerInterceptException("Interceptor managed ledger before add to bookie failed."));
+            ReferenceCountUtil.release(addOperation.data);
+            log.error("[{}] Failed to intercept adding an entry to bookie.", name, e);
+            return false;
         }
     }
 
@@ -699,9 +866,7 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
         }
 
         if (uninitializedCursors.containsKey(cursorName)) {
-            uninitializedCursors.get(cursorName).thenAccept(cursor -> {
-                callback.openCursorComplete(cursor, ctx);
-            }).exceptionally(ex -> {
+            uninitializedCursors.get(cursorName).thenAccept(cursor -> callback.openCursorComplete(cursor, ctx)).exceptionally(ex -> {
                 callback.openCursorFailed((ManagedLedgerException) ex, ctx);
                 return null;
             });
@@ -756,7 +921,8 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
             final Object ctx) {
         final ManagedCursorImpl cursor = (ManagedCursorImpl) cursors.get(consumerName);
         if (cursor == null) {
-            callback.deleteCursorFailed(new ManagedLedgerException("ManagedCursor not found: " + consumerName), ctx);
+            callback.deleteCursorFailed(new ManagedLedgerException.CursorNotFoundException("ManagedCursor not found: "
+                    + consumerName), ctx);
             return;
         } else if (!cursor.isDurable()) {
             cursors.removeCursor(consumerName);
@@ -837,7 +1003,12 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
     }
 
     @Override
-    public ManagedCursor newNonDurableCursor(Position startCursorPosition, String cursorName)
+    public ManagedCursor newNonDurableCursor(Position startPosition, String subscriptionName) throws ManagedLedgerException {
+        return newNonDurableCursor(startPosition, subscriptionName, InitialPosition.Latest);
+    }
+
+    @Override
+    public ManagedCursor newNonDurableCursor(Position startCursorPosition, String cursorName, InitialPosition initialPosition)
             throws ManagedLedgerException {
         Objects.requireNonNull(cursorName, "cursor name can't be null");
         checkManagedLedgerIsOpen();
@@ -852,7 +1023,8 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
         }
 
         NonDurableCursorImpl cursor = new NonDurableCursorImpl(bookKeeper, config, this, cursorName,
-                (PositionImpl) startCursorPosition);
+                (PositionImpl) startCursorPosition, initialPosition);
+        cursor.setActive();
 
         log.info("[{}] Opened new cursor: {}", name, cursor);
         synchronized (this) {
@@ -878,6 +1050,7 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
      * @return true if at least a cursor exists
      */
     public boolean hasActiveCursors() {
+        // Use hasCursors instead of isEmpty because isEmpty does not take into account non-durable cursors
         return !activeCursors.isEmpty();
     }
 
@@ -906,18 +1079,6 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
     }
 
     @Override
-    public void checkBackloggedCursors() {
-        // activate caught up cursors
-        cursors.forEach(cursor -> {
-            if (cursor.getNumberOfEntries() < backloggedCursorThresholdEntries) {
-                cursor.setActive();
-            } else {
-                cursor.setInactive();
-            }
-        });
-    }
-
-    @Override
     public long getEstimatedBacklogSize() {
 
         PositionImpl pos = getMarkDeletePositionOfSlowestConsumer();
@@ -933,7 +1094,7 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
             synchronized (this) {
                 size = getTotalSize();
                 size -= ledgers.values().stream().filter(li -> li.getLedgerId() < slowestConsumerLedgerId)
-                        .mapToLong(li -> li.getSize()).sum();
+                        .mapToLong(LedgerInfo::getSize).sum();
             }
 
             LedgerInfo ledgerInfo = null;
@@ -962,6 +1123,16 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
         }
     }
 
+    /**
+     * Get estimated backlog size from a specific position.
+     */
+    public long getEstimatedBacklogSize(PositionImpl pos) {
+        if (pos == null) {
+            return 0;
+        }
+        return estimateBacklogFromPosition(pos);
+    }
+
     long estimateBacklogFromPosition(PositionImpl pos) {
         synchronized (this) {
             LedgerInfo ledgerInfo = ledgers.get(pos.getLedgerId());
@@ -969,7 +1140,7 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
                 return getTotalSize(); // position no longer in managed ledger, so return total size
             }
             long sizeBeforePosLedger = ledgers.values().stream().filter(li -> li.getLedgerId() < pos.getLedgerId())
-                    .mapToLong(li -> li.getSize()).sum();
+                    .mapToLong(LedgerInfo::getSize).sum();
             long size = getTotalSize() - sizeBeforePosLedger;
 
             if (pos.getLedgerId() == currentLedger.getId()) {
@@ -984,8 +1155,12 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
         if (ledgerEntries <= 0) {
             return 0;
         }
-        long averageSize = ledgerSize / ledgerEntries;
-        return consumedEntries >= 0 ? (consumedEntries + 1) * averageSize : 0;
+        if (ledgerEntries == (consumedEntries + 1)) {
+            return ledgerSize;
+        } else {
+            long averageSize = ledgerSize / ledgerEntries;
+            return consumedEntries >= 0 ? (consumedEntries + 1) * averageSize : 0;
+        }
     }
 
     @Override
@@ -1161,6 +1336,10 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
             this.timeoutTask.cancel(false);
         }
 
+        if (this.checkLedgerRollTask != null) {
+            this.checkLedgerRollTask.cancel(false);
+        }
+
     }
 
     private void closeAllCursors(CloseCallback callback, final Object ctx) {
@@ -1172,9 +1351,7 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
             futures.add(closeFuture);
         }
 
-        Futures.waitForAll(futures).thenRun(() -> {
-            callback.closeComplete(ctx);
-        }).exceptionally(exception -> {
+        Futures.waitForAll(futures).thenRun(() -> callback.closeComplete(ctx)).exceptionally(exception -> {
             callback.closeFailed(ManagedLedgerException.getManagedLedgerException(exception.getCause()), ctx);
             return null;
         });
@@ -1211,6 +1388,8 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
         } else {
             log.info("[{}] Created new ledger {}", name, lh.getId());
             ledgers.put(lh.getId(), LedgerInfo.newBuilder().setLedgerId(lh.getId()).setTimestamp(0).build());
+            final long previousEntries = currentLedgerEntries;
+            final long previousLedgerId = currentLedger.getId();
             currentLedger = lh;
             currentLedgerEntries = 0;
             currentLedgerSize = 0;
@@ -1222,11 +1401,19 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
                         log.debug("[{}] Updating of ledgers list after create complete. version={}", name, stat);
                     }
                     ledgersStat = stat;
-                    ledgersListMutex.unlock();
+                    metadataMutex.unlock();
                     updateLedgersIdsComplete(stat);
                     synchronized (ManagedLedgerImpl.this) {
-                        mbean.addLedgerSwitchLatencySample(System.nanoTime() - lastLedgerCreationInitiationTimestamp,
-                                TimeUnit.NANOSECONDS);
+                        mbean.addLedgerSwitchLatencySample(System.currentTimeMillis() - lastLedgerCreationInitiationTimestamp,
+                                TimeUnit.MILLISECONDS);
+                    }
+                    // Move cursor read point to new ledger
+                    for (ManagedCursor cursor : cursors) {
+                        PositionImpl markDeletedPosition = (PositionImpl) cursor.getMarkDeletedPosition();
+                        if (markDeletedPosition.getLedgerId() == previousLedgerId && markDeletedPosition.getEntryId() + 1 >= previousEntries) {
+                            // All entries in last ledger are marked delete, move read point to the new ledger
+                            updateCursor((ManagedCursorImpl) cursor, PositionImpl.get(currentLedger.getId(), -1));
+                        }
                     }
                 }
 
@@ -1259,7 +1446,7 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
                         }
                     }, null);
 
-                    ledgersListMutex.unlock();
+                    metadataMutex.unlock();
 
                     synchronized (ManagedLedgerImpl.this) {
                         lastLedgerCreationFailureTimestamp = clock.millis();
@@ -1274,7 +1461,7 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
     }
 
     private void updateLedgersListAfterRollover(MetaStoreCallback<Void> callback) {
-        if (!ledgersListMutex.tryLock()) {
+        if (!metadataMutex.tryLock()) {
             // Defer update for later
             scheduledExecutor.schedule(() -> updateLedgersListAfterRollover(callback), 100, TimeUnit.MILLISECONDS);
             return;
@@ -1294,9 +1481,26 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
             log.debug("[{}] Resending {} pending messages", name, pendingAddEntries.size());
         }
 
+        // Avoid use same OpAddEntry between different ledger handle
+        int pendingSize = pendingAddEntries.size();
+        OpAddEntry existsOp;
+        do {
+            existsOp = pendingAddEntries.poll();
+            if (existsOp != null) {
+                // If op is used by another ledger handle, we need to close it and create a new one
+                if (existsOp.ledger != null) {
+                    existsOp.close();
+                    existsOp = OpAddEntry.create(existsOp.ml, existsOp.data, existsOp.getNumberOfMessages(), existsOp.callback, existsOp.ctx);
+                }
+                existsOp.setLedger(currentLedger);
+                if (beforeAddEntry(existsOp)) {
+                    pendingAddEntries.add(existsOp);
+                }
+            }
+        } while (existsOp != null && --pendingSize > 0);
+
         // Process all the pending addEntry requests
         for (OpAddEntry op : pendingAddEntries) {
-            op.setLedger(currentLedger);
             ++currentLedgerEntries;
             currentLedgerSize += op.data.readableBytes();
 
@@ -1361,14 +1565,90 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
 
         if (!pendingAddEntries.isEmpty()) {
             // Need to create a new ledger to write pending entries
-            if (log.isDebugEnabled()) {
-                log.debug("[{}] Creating a new ledger", name);
-            }
+            log.info("[{}] Creating a new ledger", name);
             STATE_UPDATER.set(this, State.CreatingLedger);
-            this.lastLedgerCreationInitiationTimestamp = System.nanoTime();
+            this.lastLedgerCreationInitiationTimestamp = System.currentTimeMillis();
             mbean.startDataLedgerCreateOp();
             asyncCreateLedger(bookKeeper, config, digestType, this, Collections.emptyMap());
         }
+    }
+
+    synchronized void createLedgerAfterClosed() {
+        STATE_UPDATER.set(this, State.CreatingLedger);
+        this.lastLedgerCreationInitiationTimestamp = System.nanoTime();
+        mbean.startDataLedgerCreateOp();
+        asyncCreateLedger(bookKeeper, config, digestType, this, Collections.emptyMap());
+    }
+
+    @VisibleForTesting
+    @Override
+    public void rollCurrentLedgerIfFull() {
+        log.info("[{}] Start checking if current ledger is full", name);
+        if (currentLedgerEntries > 0 && currentLedgerIsFull()) {
+            STATE_UPDATER.set(this, State.ClosingLedger);
+            currentLedger.asyncClose(new AsyncCallback.CloseCallback() {
+                @Override
+                public void closeComplete(int rc, LedgerHandle lh, Object o) {
+                    checkArgument(currentLedger.getId() == lh.getId(), "ledgerId %s doesn't match with acked ledgerId %s",
+                            currentLedger.getId(),
+                            lh.getId());
+
+                    if (rc == BKException.Code.OK) {
+                        log.debug("Successfully closed ledger {}", lh.getId());
+                    } else {
+                        log.warn("Error when closing ledger {}. Status={}", lh.getId(), BKException.getMessage(rc));
+                    }
+
+                    ledgerClosed(lh);
+                    createLedgerAfterClosed();
+                }
+            }, System.nanoTime());
+        }
+    }
+
+    @Override
+    public CompletableFuture<Position> asyncFindPosition(com.google.common.base.Predicate<Entry> predicate) {
+
+        CompletableFuture<Position> future = new CompletableFuture();
+        Long firstLedgerId = ledgers.firstKey();
+        final PositionImpl startPosition = firstLedgerId == null ? null : new PositionImpl(firstLedgerId, 0);
+        if (startPosition == null) {
+            future.complete(null);
+            return future;
+        }
+        AsyncCallbacks.FindEntryCallback findEntryCallback = new AsyncCallbacks.FindEntryCallback() {
+            @Override
+            public void findEntryComplete(Position position, Object ctx) {
+                final Position finalPosition;
+                if (position == null) {
+                    finalPosition = startPosition;
+                    if (finalPosition == null) {
+                        log.warn("[{}] Unable to find position for predicate {}.", name, predicate);
+                        future.complete(null);
+                        return;
+                    }
+                    log.info("[{}] Unable to find position for predicate {}. Use the first position {} instead.", name, predicate, startPosition);
+                } else {
+                    finalPosition = getNextValidPosition((PositionImpl) position);
+                }
+                future.complete((PositionImpl) finalPosition);
+            }
+
+            @Override
+            public void findEntryFailed(ManagedLedgerException exception, Optional<Position> failedReadPosition, Object ctx) {
+                log.warn("[{}] Unable to find position for predicate {}.", name, predicate);
+                future.complete(null);
+            }
+        };
+        long max = getNumberOfEntries() - 1;
+        OpFindNewest op = new OpFindNewest(this, startPosition, predicate, max, findEntryCallback, null);
+        op.find();
+        return future;
+    }
+
+    @Override
+    public ManagedLedgerInterceptor getManagedLedgerInterceptor() {
+        return managedLedgerInterceptor;
     }
 
     void clearPendingAddEntries(ManagedLedgerException e) {
@@ -1405,9 +1685,7 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
             }
 
             // Get a ledger handle to read from
-            getLedgerHandle(ledgerId).thenAccept(ledger -> {
-                internalReadFromLedger(ledger, opReadEntry);
-            }).exceptionally(ex -> {
+            getLedgerHandle(ledgerId).thenAccept(ledger -> internalReadFromLedger(ledger, opReadEntry)).exceptionally(ex -> {
                 log.error("[{}] Error opening ledger for reading at position {} - {}", name, opReadEntry.readPosition,
                         ex.getMessage());
                 opReadEntry.readEntriesFailed(ManagedLedgerException.getManagedLedgerException(ex.getCause()),
@@ -1415,6 +1693,18 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
                 return null;
             });
         }
+    }
+
+    public CompletableFuture<String> getLedgerMetadata(long ledgerId) {
+        return getLedgerHandle(ledgerId).thenApply(rh -> rh.getLedgerMetadata().toSafeString());
+    }
+
+    @Override
+    public CompletableFuture<LedgerInfo> getLedgerInfo(long ledgerId) {
+        CompletableFuture<LedgerInfo> result = new CompletableFuture<>();
+        final LedgerInfo ledgerInfo = ledgers.get(ledgerId);
+        result.complete(ledgerInfo);
+        return result;
     }
 
     CompletableFuture<ReadHandle> getLedgerHandle(long ledgerId) {
@@ -1435,7 +1725,18 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
 
             LedgerInfo info = ledgers.get(ledgerId);
             CompletableFuture<ReadHandle> openFuture = new CompletableFuture<>();
-            if (info != null && info.hasOffloadContext() && info.getOffloadContext().getComplete()) {
+
+            if (config.getLedgerOffloader() != null
+                    && config.getLedgerOffloader().getOffloadPolicies() != null
+                    && config.getLedgerOffloader().getOffloadPolicies()
+                    .getManagedLedgerOffloadedReadPriority() == OffloadedReadPriority.BOOKKEEPER_FIRST
+                    && info != null && info.hasOffloadContext()
+                    && !info.getOffloadContext().getBookkeeperDeleted()) {
+                openFuture = bookKeeper.newOpenLedgerOp().withRecovery(!isReadOnly()).withLedgerId(ledgerId)
+                        .withDigestType(config.getDigestType()).withPassword(config.getPassword()).execute();
+
+            } else if (info != null && info.hasOffloadContext() && info.getOffloadContext().getComplete()) {
+
                 UUID uid = new UUID(info.getOffloadContext().getUidMsb(), info.getOffloadContext().getUidLsb());
                 // TODO: improve this to load ledger offloader by driver name recorded in metadata
                 Map<String, String> offloadDriverMetadata = OffloadUtils.getOffloadDriverMetadata(info);
@@ -1483,12 +1784,9 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
             log.debug("[{}] Reading entry ledger {}: {}", name, position.getLedgerId(), position.getEntryId());
         }
         if (position.getLedgerId() == currentLedger.getId()) {
-            LedgerHandle ledger = currentLedger;
-            asyncReadEntry(ledger, position, callback, ctx);
+            asyncReadEntry(currentLedger, position, callback, ctx);
         } else {
-            getLedgerHandle(position.getLedgerId()).thenAccept(ledger -> {
-                asyncReadEntry(ledger, position, callback, ctx);
-            }).exceptionally(ex -> {
+            getLedgerHandle(position.getLedgerId()).thenAccept(ledger -> asyncReadEntry(ledger, position, callback, ctx)).exceptionally(ex -> {
                 log.error("[{}] Error opening ledger for reading at position {} - {}", name, position, ex.getMessage());
                 callback.readEntryFailed(ManagedLedgerException.getManagedLedgerException(ex.getCause()), ctx);
                 return null;
@@ -1499,10 +1797,13 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
 
     private void internalReadFromLedger(ReadHandle ledger, OpReadEntry opReadEntry) {
 
+        if (opReadEntry.readPosition.compareTo(opReadEntry.maxPosition) > 0) {
+            opReadEntry.checkReadCompletion();
+            return;
+        }
         // Perform the read
         long firstEntry = opReadEntry.readPosition.getEntryId();
         long lastEntryInLedger;
-        final ManagedCursorImpl cursor = opReadEntry.cursor;
 
         PositionImpl lastPosition = lastConfirmedEntry;
 
@@ -1513,6 +1814,11 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
         } else {
             // For other ledgers, already closed the BK lastAddConfirmed is appropriate
             lastEntryInLedger = ledger.getLastAddConfirmed();
+        }
+
+        // can read max position entryId
+        if (ledger.getId() == opReadEntry.maxPosition.getLedgerId()) {
+            lastEntryInLedger = min(opReadEntry.maxPosition.getEntryId(), lastEntryInLedger);
         }
 
         if (firstEntry > lastEntryInLedger) {
@@ -1530,6 +1836,8 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
                 } else {
                     opReadEntry.updateReadPosition(new PositionImpl(ledger.getId() + 1, 0));
                 }
+            } else {
+                opReadEntry.updateReadPosition(opReadEntry.readPosition);
             }
 
             opReadEntry.checkReadCompletion();
@@ -1685,7 +1993,7 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
         }
 
         private long reOpCount(Object ctx) {
-            return (ctx != null && ctx instanceof Long) ? (long) ctx : -1;
+            return (ctx instanceof Long) ? (long) ctx : -1;
         }
 
         public void readFailed(ManagedLedgerException exception, Object ctx) {
@@ -1790,8 +2098,13 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
         }
     }
 
-    PositionImpl startReadOperationOnLedger(PositionImpl position) {
-        long ledgerId = ledgers.ceilingKey(position.getLedgerId());
+    PositionImpl startReadOperationOnLedger(PositionImpl position, OpReadEntry opReadEntry) {
+        Long ledgerId = ledgers.ceilingKey(position.getLedgerId());
+        if (null == ledgerId) {
+            opReadEntry.readEntriesFailed(new ManagedLedgerException.NoMoreEntriesToReadException("The ceilingKey(K key) method is used to return the " +
+                    "least key greater than or equal to the given key, or null if there is no such key"), null);
+        }
+
         if (ledgerId != position.getLedgerId()) {
             // The ledger pointed by this position does not exist anymore. It was deleted because it was empty. We need
             // to skip on the next available ledger
@@ -1808,18 +2121,32 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
                 break;
             }
 
-            executor.execute(safeRun(() -> waitingCursor.notifyEntriesAvailable()));
+            executor.execute(safeRun(waitingCursor::notifyEntriesAvailable));
         }
+    }
+
+    void notifyWaitingEntryCallBacks() {
+        while (true) {
+            final WaitingEntryCallBack cb = waitingEntryCallBacks.poll();
+            if (cb == null) {
+                break;
+            }
+
+            executor.execute(safeRun(cb::entriesAvailable));
+        }
+    }
+
+    public void addWaitingEntryCallBack(WaitingEntryCallBack cb) {
+        this.waitingEntryCallBacks.add(cb);
     }
 
     private void trimConsumedLedgersInBackground() {
         trimConsumedLedgersInBackground(Futures.NULL_PROMISE);
     }
 
-    private void trimConsumedLedgersInBackground(CompletableFuture<?> promise) {
-        executor.executeOrdered(name, safeRun(() -> {
-            internalTrimConsumedLedgers(promise);
-        }));
+    @Override
+    public void trimConsumedLedgersInBackground(CompletableFuture<?> promise) {
+        executor.executeOrdered(name, safeRun(() -> internalTrimConsumedLedgers(promise)));
     }
 
     private void scheduleDeferredTrimming(CompletableFuture<?> promise) {
@@ -1827,7 +2154,11 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
     }
 
     private void maybeOffloadInBackground(CompletableFuture<PositionImpl> promise) {
-        if (config.getOffloadAutoTriggerSizeThresholdBytes() >= 0) {
+        if (config.getLedgerOffloader() != null
+                && config.getLedgerOffloader() != NullLedgerOffloader.INSTANCE
+                && config.getLedgerOffloader().getOffloadPolicies() != null
+                && config.getLedgerOffloader().getOffloadPolicies().getManagedLedgerOffloadThresholdInBytes() != null
+                && config.getLedgerOffloader().getOffloadPolicies().getManagedLedgerOffloadThresholdInBytes() >= 0) {
             executor.executeOrdered(name, safeRun(() -> maybeOffload(promise)));
         }
     }
@@ -1847,39 +2178,45 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
                     }
                 });
 
-            long threshold = config.getOffloadAutoTriggerSizeThresholdBytes();
-            long sizeSummed = 0;
-            long alreadyOffloadedSize = 0;
-            long toOffloadSize = 0;
+            if (config.getLedgerOffloader() != null
+                    && config.getLedgerOffloader() != NullLedgerOffloader.INSTANCE
+                    && config.getLedgerOffloader().getOffloadPolicies() != null
+                    && config.getLedgerOffloader().getOffloadPolicies().getManagedLedgerOffloadThresholdInBytes() != null) {
+                long threshold = config.getLedgerOffloader().getOffloadPolicies().getManagedLedgerOffloadThresholdInBytes();
 
-            ConcurrentLinkedDeque<LedgerInfo> toOffload = new ConcurrentLinkedDeque();
+                long sizeSummed = 0;
+                long alreadyOffloadedSize = 0;
+                long toOffloadSize = 0;
 
-            // go through ledger list from newest to oldest and build a list to offload in oldest to newest order
-            for (Map.Entry<Long, LedgerInfo> e : ledgers.descendingMap().entrySet()) {
-                long size = e.getValue().getSize();
-                sizeSummed += size;
-                boolean alreadyOffloaded = e.getValue().hasOffloadContext()
-                    && e.getValue().getOffloadContext().getComplete();
-                if (alreadyOffloaded) {
-                    alreadyOffloadedSize += size;
-                } else if (sizeSummed > threshold) {
-                    toOffloadSize += size;
-                    toOffload.addFirst(e.getValue());
+                ConcurrentLinkedDeque<LedgerInfo> toOffload = new ConcurrentLinkedDeque<>();
+
+                // go through ledger list from newest to oldest and build a list to offload in oldest to newest order
+                for (Map.Entry<Long, LedgerInfo> e : ledgers.descendingMap().entrySet()) {
+                    long size = e.getValue().getSize();
+                    sizeSummed += size;
+                    boolean alreadyOffloaded = e.getValue().hasOffloadContext()
+                            && e.getValue().getOffloadContext().getComplete();
+                    if (alreadyOffloaded) {
+                        alreadyOffloadedSize += size;
+                    } else if (sizeSummed > threshold) {
+                        toOffloadSize += size;
+                        toOffload.addFirst(e.getValue());
+                    }
                 }
-            }
 
-            if (toOffload.size() > 0) {
-                log.info("[{}] Going to automatically offload ledgers {}"
-                         + ", total size = {}, already offloaded = {}, to offload = {}",
-                         name, toOffload.stream().map(l -> l.getLedgerId()).collect(Collectors.toList()),
-                         sizeSummed, alreadyOffloadedSize, toOffloadSize);
-            } else {
-                // offloadLoop will complete immediately with an empty list to offload
-                log.debug("[{}] Nothing to offload, total size = {}, already offloaded = {}, threshold = {}",
-                          name, sizeSummed, alreadyOffloadedSize, threshold);
-            }
+                if (toOffload.size() > 0) {
+                    log.info("[{}] Going to automatically offload ledgers {}"
+                                    + ", total size = {}, already offloaded = {}, to offload = {}",
+                            name, toOffload.stream().map(LedgerInfo::getLedgerId).collect(Collectors.toList()),
+                            sizeSummed, alreadyOffloadedSize, toOffloadSize);
+                } else {
+                    // offloadLoop will complete immediately with an empty list to offload
+                    log.debug("[{}] Nothing to offload, total size = {}, already offloaded = {}, threshold = {}",
+                            name, sizeSummed, alreadyOffloadedSize, threshold);
+                }
 
-            offloadLoop(unlockingPromise, toOffload, PositionImpl.latest, Optional.empty());
+                offloadLoop(unlockingPromise, toOffload, PositionImpl.latest, Optional.empty());
+            }
         }
     }
 
@@ -1896,13 +2233,22 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
     private boolean isLedgerRetentionOverSizeQuota() {
         // Handle the -1 size limit as "infinite" size quota
         return config.getRetentionSizeInMB() >= 0
-                && TOTAL_SIZE_UPDATER.get(this) > ((long) config.getRetentionSizeInMB()) * 1024 * 1024;
+                && TOTAL_SIZE_UPDATER.get(this) > config.getRetentionSizeInMB() * 1024 * 1024;
     }
 
     private boolean isOffloadedNeedsDelete(OffloadContext offload) {
         long elapsedMs = clock.millis() - offload.getTimestamp();
-        return offload.getComplete() && !offload.getBookkeeperDeleted()
-                && elapsedMs > config.getOffloadLedgerDeletionLagMillis();
+
+        if (config.getLedgerOffloader() != null && config.getLedgerOffloader() != NullLedgerOffloader.INSTANCE
+                && config.getLedgerOffloader().getOffloadPolicies() != null
+                && config.getLedgerOffloader().getOffloadPolicies()
+                    .getManagedLedgerOffloadDeletionLagInMillis() != null) {
+            return offload.getComplete() && !offload.getBookkeeperDeleted()
+                    && elapsedMs > config.getLedgerOffloader()
+                    .getOffloadPolicies().getManagedLedgerOffloadDeletionLagInMillis();
+        } else {
+            return false;
+        }
     }
 
     /**
@@ -1932,7 +2278,7 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
             }
 
             long slowestReaderLedgerId = -1;
-            if (cursors.isEmpty()) {
+            if (!cursors.hasDurableCursors()) {
                 // At this point the lastLedger will be pointing to the
                 // ledger that has just been closed, therefore the +1 to
                 // include lastLedger in the trimming.
@@ -1951,7 +2297,6 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
             if (log.isDebugEnabled()) {
                 log.debug("[{}] Slowest consumer ledger id: {}", name, slowestReaderLedgerId);
             }
-
             // skip ledger if retention constraint met
             for (LedgerInfo ls : ledgers.headMap(slowestReaderLedgerId, false).values()) {
                 boolean expired = hasLedgerRetentionExpired(ls.getTimestamp());
@@ -1965,7 +2310,7 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
                             overRetentionQuota, currentLedger.getId());
                 }
                 if (ls.getLedgerId() == currentLedger.getId()) {
-                    log.debug("[{}] ledger id skipped for deletion as it is currently being written to", name,
+                    log.debug("[{}] Ledger {} skipped for deletion as it is currently being written to", name,
                             ls.getLedgerId());
                     break;
                 } else if (expired) {
@@ -1994,14 +2339,22 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
             }
 
             if (STATE_UPDATER.get(this) == State.CreatingLedger // Give up now and schedule a new trimming
-                    || !ledgersListMutex.tryLock()) { // Avoid deadlocks with other operations updating the ledgers list
+                    || !metadataMutex.tryLock()) { // Avoid deadlocks with other operations updating the ledgers list
                 scheduleDeferredTrimming(promise);
                 trimmerMutex.unlock();
                 return;
             }
 
+            advanceNonDurableCursors(ledgersToDelete);
+
+            PositionImpl currentLastConfirmedEntry = lastConfirmedEntry;
             // Update metadata
             for (LedgerInfo ls : ledgersToDelete) {
+                if (currentLastConfirmedEntry != null && ls.getLedgerId() == currentLastConfirmedEntry.getLedgerId()) {
+                    // this info is relevant because the lastMessageId won't be available anymore
+                    log.info("[{}] Ledger {} contains the current last confirmed entry {}, and it is going to be deleted", name,
+                            ls.getLedgerId(), currentLastConfirmedEntry);
+                }
                 ledgerCache.remove(ls.getLedgerId());
 
                 ledgers.remove(ls.getLedgerId());
@@ -2031,7 +2384,7 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
                     log.info("[{}] End TrimConsumedLedgers. ledgers={} totalSize={}", name, ledgers.size(),
                             TOTAL_SIZE_UPDATER.get(ManagedLedgerImpl.this));
                     ledgersStat = stat;
-                    ledgersListMutex.unlock();
+                    metadataMutex.unlock();
                     trimmerMutex.unlock();
 
                     for (LedgerInfo ls : ledgersToDelete) {
@@ -2049,13 +2402,44 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
                 @Override
                 public void operationFailed(MetaStoreException e) {
                     log.warn("[{}] Failed to update the list of ledgers after trimming", name, e);
-                    ledgersListMutex.unlock();
+                    metadataMutex.unlock();
                     trimmerMutex.unlock();
 
                     promise.completeExceptionally(e);
                 }
             });
         }
+    }
+
+    /**
+     * Non-durable cursors have to be moved forward when data is trimmed since they are not retain that data.
+     * This is to make sure that the `consumedEntries` counter is correctly updated with the number of skipped
+     * entries and the stats are reported correctly.
+     */
+    private void advanceNonDurableCursors(List<LedgerInfo> ledgersToDelete) {
+        if (ledgersToDelete.isEmpty()) {
+            return;
+        }
+
+        long firstNonDeletedLedger = ledgers
+                .higherKey(ledgersToDelete.get(ledgersToDelete.size() - 1).getLedgerId());
+        PositionImpl highestPositionToDelete = new PositionImpl(firstNonDeletedLedger, -1);
+
+        cursors.forEach(cursor -> {
+            if (highestPositionToDelete.compareTo((PositionImpl) cursor.getMarkDeletedPosition()) > 0) {
+                cursor.asyncMarkDelete(highestPositionToDelete, new MarkDeleteCallback() {
+                    @Override
+                    public void markDeleteComplete(Object ctx) {
+                    }
+
+                    @Override
+                    public void markDeleteFailed(ManagedLedgerException exception, Object ctx) {
+                        log.warn("[{}] Failed to mark delete while trimming data ledgers: {}", name,
+                                exception.getMessage());
+                    }
+                }, null);
+            }
+        });
     }
 
     /**
@@ -2125,7 +2509,14 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
 
                 @Override
                 public void deleteCursorFailed(ManagedLedgerException exception, Object ctx) {
-                    log.warn("[{}] Failed to delete cursor {}", name, cursor, exception);
+                    if (exception instanceof CursorNotFoundException) {
+                        // This could happen if a cursor is getting deleted while we are deleting the topic
+                        // Treating this as a "success" case, since the cursor is gone in any case.
+                        deleteCursorComplete(ctx);
+                        return;
+                    }
+
+                    log.warn("[{}] Failed to delete cursor {}: {}", name, cursor, exception.getMessage(), exception);
                     cursorDeleteException.compareAndSet(null, exception);
                     if (cursorsToDelete.decrementAndGet() == 0) {
                         // Trigger callback only once
@@ -2164,10 +2555,8 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
             if (isNoSuchLedgerExistsException(rc)) {
                 log.warn("[{}] Ledger was already deleted {}", name, ledgerId);
             } else if (rc != BKException.Code.OK) {
-                log.error("[{}] Error deleting ledger {}", name, ledgerId, BKException.getMessage(rc));
-                scheduledExecutor.schedule(safeRun(() -> {
-                    asyncDeleteLedger(ledgerId, retry - 1);
-                }), DEFAULT_LEDGER_DELETE_BACKOFF_TIME_SEC, TimeUnit.SECONDS);
+                log.error("[{}] Error deleting ledger {} : {}", name, ledgerId, BKException.getMessage(rc));
+                scheduledExecutor.schedule(safeRun(() -> asyncDeleteLedger(ledgerId, retry - 1)), DEFAULT_LEDGER_DELETE_BACKOFF_TIME_SEC, TimeUnit.SECONDS);
             } else {
                 if (log.isDebugEnabled()) {
                     log.debug("[{}] Deleted ledger {}", name, ledgerId);
@@ -2327,7 +2716,7 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
 
         if (offloadMutex.tryLock()) {
             log.info("[{}] Going to offload ledgers {}", name,
-                    ledgersToOffload.stream().map(l -> l.getLedgerId()).collect(Collectors.toList()));
+                    ledgersToOffload.stream().map(LedgerInfo::getLedgerId).collect(Collectors.toList()));
 
             CompletableFuture<PositionImpl> promise = new CompletableFuture<>();
             promise.whenComplete((result, exception) -> {
@@ -2373,6 +2762,8 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
                                            scheduledExecutor, name)
                             .whenComplete((ignore2, exception) -> {
                                     if (exception != null) {
+                                        log.error("[{}] Failed to offload data for the ledgerId {}",
+                                                name, ledgerId, exception);
                                         cleanupOffloaded(
                                             ledgerId, uuid,
                                             driverName, driverMetadata,
@@ -2422,7 +2813,7 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
     }
 
     private CompletableFuture<Void> transformLedgerInfo(long ledgerId, LedgerInfoTransformation transformation) {
-        CompletableFuture<Void> promise = new CompletableFuture<Void>();
+        CompletableFuture<Void> promise = new CompletableFuture<>();
 
         tryTransformLedgerInfo(ledgerId, transformation, promise);
 
@@ -2432,7 +2823,7 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
     private void tryTransformLedgerInfo(long ledgerId, LedgerInfoTransformation transformation,
             CompletableFuture<Void> finalPromise) {
         synchronized (this) {
-            if (!ledgersListMutex.tryLock()) {
+            if (!metadataMutex.tryLock()) {
                 // retry in 100 milliseconds
                 scheduledExecutor.schedule(
                         safeRun(() -> tryTransformLedgerInfo(ledgerId, transformation, finalPromise)), 100,
@@ -2440,7 +2831,7 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
             } else { // lock acquired
                 CompletableFuture<Void> unlockingPromise = new CompletableFuture<>();
                 unlockingPromise.whenComplete((res, ex) -> {
-                    ledgersListMutex.unlock();
+                    metadataMutex.unlock();
                     if (ex != null) {
                         finalPromise.completeExceptionally(ex);
                     } else {
@@ -2455,12 +2846,14 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
                 } else {
                     try {
                         LedgerInfo newInfo = transformation.transform(oldInfo);
-                        ledgers.put(ledgerId, newInfo);
-                        store.asyncUpdateLedgerIds(name, getManagedLedgerInfo(), ledgersStat,
+                        final HashMap<Long, LedgerInfo> newLedgers = new HashMap<>(ledgers);
+                        newLedgers.put(ledgerId, newInfo);
+                        store.asyncUpdateLedgerIds(name, buildManagedLedgerInfo(newLedgers), ledgersStat,
                                 new MetaStoreCallback<Void>() {
                                     @Override
                                     public void operationComplete(Void result, Stat stat) {
                                         ledgersStat = stat;
+                                        ledgers.put(ledgerId, newInfo);
                                         unlockingPromise.complete(null);
                                     }
 
@@ -2561,13 +2954,15 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
                                                                                        * identify offloader
                                                                                        */
             Map<String, String> offloadDriverMetadata, String cleanupReason) {
+        log.info("[{}] Cleanup offload for ledgerId {} uuid {} because of the reason {}.",
+                name, ledgerId, uuid.toString(), cleanupReason);
         Retries.run(Backoff.exponentialJittered(TimeUnit.SECONDS.toMillis(1), TimeUnit.SECONDS.toHours(1)).limit(10),
                 Retries.NonFatalPredicate,
                 () -> config.getLedgerOffloader().deleteOffloaded(ledgerId, uuid, offloadDriverMetadata),
                 scheduledExecutor, name).whenComplete((ignored, exception) -> {
                     if (exception != null) {
-                        log.warn("Error cleaning up offload for {}, (cleanup reason: {})", ledgerId, cleanupReason,
-                                exception);
+                        log.warn("[{}] Error cleaning up offload for {}, (cleanup reason: {})",
+                                name, ledgerId, cleanupReason, exception);
                     }
                 });
     }
@@ -2726,7 +3121,7 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
      *            the position to validate
      * @return true if the position is valid, false otherwise
      */
-    boolean isValidPosition(PositionImpl position) {
+    public boolean isValidPosition(PositionImpl position) {
         PositionImpl last = lastConfirmedEntry;
         if (log.isDebugEnabled()) {
             log.debug("IsValid position: {} -- last: {}", position, last);
@@ -2765,13 +3160,26 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
     }
 
     public PositionImpl getNextValidPosition(final PositionImpl position) {
+        PositionImpl next;
+        try {
+            next = getNextValidPositionInternal(position);
+        } catch (NullPointerException e) {
+            next = lastConfirmedEntry.getNext();
+            if (log.isDebugEnabled()) {
+                log.debug("[{}] Can't find next valid position, fall back to the next position of the last position.", name, e);
+            }
+        }
+        return next;
+    }
+
+    public PositionImpl getNextValidPositionInternal(final PositionImpl position) {
         PositionImpl nextPosition = position.getNext();
         while (!isValidPosition(nextPosition)) {
             Long nextLedgerId = ledgers.ceilingKey(nextPosition.getLedgerId() + 1);
             if (nextLedgerId == null) {
-                return null;
+                throw new NullPointerException();
             }
-            nextPosition = PositionImpl.get(nextLedgerId.longValue(), 0);
+            nextPosition = PositionImpl.get(nextLedgerId, 0);
         }
         return nextPosition;
     }
@@ -2847,7 +3255,7 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
         synchronized (activeCursors) {
             if (activeCursors.get(cursor.getName()) != null) {
                 activeCursors.removeCursor(cursor.getName());
-                if (activeCursors.isEmpty()) {
+                if (!activeCursors.hasDurableCursors()) {
                     // cleanup cache if there is no active subscription
                     entryCache.clear();
                 } else {
@@ -2861,7 +3269,7 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
     }
 
     public boolean isCursorActive(ManagedCursor cursor) {
-        return cursor.isDurable() && activeCursors.get(cursor.getName()) != null;
+        return activeCursors.get(cursor.getName()) != null;
     }
 
     private boolean currentLedgerIsFull() {
@@ -2909,6 +3317,30 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
         if (state == State.Terminated) {
             mlInfo.setTerminatedPosition(NestedPositionInfo.newBuilder().setLedgerId(lastConfirmedEntry.getLedgerId())
                     .setEntryId(lastConfirmedEntry.getEntryId()));
+        }
+        if (managedLedgerInterceptor != null) {
+            managedLedgerInterceptor.onUpdateManagedLedgerInfo(propertiesMap);
+        }
+        for (Map.Entry<String, String> property : propertiesMap.entrySet()) {
+            mlInfo.addProperties(MLDataFormats.KeyValue.newBuilder()
+                    .setKey(property.getKey()).setValue(property.getValue()));
+        }
+
+        return mlInfo.build();
+    }
+
+    private ManagedLedgerInfo buildManagedLedgerInfo(Map<Long, LedgerInfo> ledgers) {
+        ManagedLedgerInfo.Builder mlInfo = ManagedLedgerInfo.newBuilder().addAllLedgerInfo(ledgers.values());
+        if (state == State.Terminated) {
+            mlInfo.setTerminatedPosition(NestedPositionInfo.newBuilder().setLedgerId(lastConfirmedEntry.getLedgerId())
+                    .setEntryId(lastConfirmedEntry.getEntryId()));
+        }
+        if (managedLedgerInterceptor != null) {
+            managedLedgerInterceptor.onUpdateManagedLedgerInfo(propertiesMap);
+        }
+        for (Map.Entry<String, String> property : propertiesMap.entrySet()) {
+            mlInfo.addProperties(MLDataFormats.KeyValue.newBuilder()
+                    .setKey(property.getKey()).setValue(property.getValue()));
         }
 
         return mlInfo.build();
@@ -3040,7 +3472,8 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
                 && !(t.getCause() instanceof CompletionException) /* check to avoid stackoverlflow */) {
             return createManagedLedgerException(t.getCause());
         } else {
-            return new ManagedLedgerException("Unknown exception");
+            log.error("Unknown exception for ManagedLedgerException.", t);
+            return new ManagedLedgerException("Other exception", t);
         }
     }
 
@@ -3060,16 +3493,42 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
         Map<String, byte[]> finalMetadata = new HashMap<>();
         finalMetadata.putAll(ledgerMetadata);
         finalMetadata.putAll(metadata);
-        if (log.isDebugEnabled()) {
-            log.debug("creating ledger, metadata: "+finalMetadata);
+        if (config.getBookKeeperEnsemblePlacementPolicyClassName() != null
+            && config.getBookKeeperEnsemblePlacementPolicyProperties() != null) {
+            try {
+                finalMetadata.putAll(LedgerMetadataUtils.buildMetadataForPlacementPolicyConfig(
+                    config.getBookKeeperEnsemblePlacementPolicyClassName(),
+                    config.getBookKeeperEnsemblePlacementPolicyProperties()
+                ));
+            } catch (EnsemblePlacementPolicyConfig.ParseEnsemblePlacementPolicyConfigException e) {
+                log.error("[{}] Serialize the placement configuration failed", name, e);
+                cb.createComplete(Code.UnexpectedConditionException, null, ledgerCreated);
+                return;
+            }
         }
-        bookKeeper.asyncCreateLedger(config.getEnsembleSize(), config.getWriteQuorumSize(), config.getAckQuorumSize(),
+        createdLedgerCustomMetadata = finalMetadata;
+        log.info("[{}] Creating ledger, metadata: {} - metadata ops timeout : {} seconds",
+            name, finalMetadata, config.getMetadataOperationsTimeoutSeconds());
+        try {
+            bookKeeper.asyncCreateLedger(config.getEnsembleSize(), config.getWriteQuorumSize(), config.getAckQuorumSize(),
                 digestType, config.getPassword(), cb, ledgerCreated, finalMetadata);
+        } catch (Throwable cause) {
+            log.error("[{}] Encountered unexpected error when creating ledger",
+                name, cause);
+            cb.createComplete(Code.UnexpectedConditionException, null, ledgerCreated);
+            return;
+        }
         scheduledExecutor.schedule(() -> {
             if (!ledgerCreated.get()) {
-                ledgerCreated.set(true);
-                cb.createComplete(BKException.Code.TimeoutException, null, null);
+                if (log.isDebugEnabled()) {
+                    log.debug("[{}] Timeout creating ledger", name);
+                }
+            } else {
+                if (log.isDebugEnabled()) {
+                    log.debug("[{}] Ledger already created when timeout task is triggered", name);
+                }
             }
+            cb.createComplete(BKException.Code.TimeoutException, null, ledgerCreated);
         }, config.getMetadataOperationsTimeoutSeconds(), TimeUnit.SECONDS);
     }
 
@@ -3082,16 +3541,17 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
      * @return
      */
     protected boolean checkAndCompleteLedgerOpTask(int rc, LedgerHandle lh, Object ctx) {
-        if (ctx != null && ctx instanceof AtomicBoolean) {
+        if (ctx instanceof AtomicBoolean) {
             // ledger-creation is already timed out and callback is already completed so, delete this ledger and return.
-            if (((AtomicBoolean) (ctx)).get()) {
+            if (((AtomicBoolean) (ctx)).compareAndSet(false, true)) {
+                return false;
+            } else {
                 if (rc == BKException.Code.OK) {
                     log.warn("[{}]-{} ledger creation timed-out, deleting ledger", this.name, lh.getId());
                     asyncDeleteLedger(lh.getId(), DEFAULT_LEDGER_DELETE_RETRIES);
                 }
                 return true;
             }
-            ((AtomicBoolean) ctx).set(true);
         }
         return false;
     }
@@ -3107,6 +3567,15 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
                 checkAddTimeout();
                 checkReadTimeout();
             }), timeoutSec, timeoutSec, TimeUnit.SECONDS);
+        }
+    }
+
+    private void scheduleRollOverLedgerTask() {
+        if (config.getMaximumRolloverTimeMs() > 0) {
+            long interval = config.getMaximumRolloverTimeMs();
+            this.checkLedgerRollTask = this.scheduledExecutor.scheduleAtFixedRate(safeRun(() -> {
+                rollCurrentLedgerIfFull();
+            }), interval, interval, TimeUnit.MILLISECONDS);
         }
     }
 
@@ -3134,10 +3603,8 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
         }
         ReadEntryCallbackWrapper callback = this.lastReadCallback;
         long readOpCount = callback != null ? callback.readOpCount : 0;
-        boolean timeout = callback != null
-                ? (TimeUnit.NANOSECONDS.toSeconds(System.nanoTime() - callback.createdTime) >= timeoutSec)
-                : false;
-        if (readOpCount > 0 && callback != null && timeout) {
+        boolean timeout = callback != null && (TimeUnit.NANOSECONDS.toSeconds(System.nanoTime() - callback.createdTime) >= timeoutSec);
+        if (readOpCount > 0 && timeout) {
             log.warn("[{}]-{}-{} read entry timeout after {} sec", this.name, this.lastReadCallback.ledgerId,
                     this.lastReadCallback.entryId, timeoutSec);
             callback.readFailed(createManagedLedgerException(BKException.Code.TimeoutException), readOpCount);
@@ -3155,6 +3622,111 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
         }
 
         return offloadedSize;
+    }
+
+    @Override
+    public Map<String, String> getProperties() {
+        return propertiesMap;
+    }
+
+    @Override
+    public void setProperty(String key, String value) throws InterruptedException, ManagedLedgerException {
+        Map<String, String> map = new HashMap<>();
+        map.put(key, value);
+        updateProperties(map, false, null);
+    }
+
+    @Override
+    public void asyncSetProperty(String key, String value, final UpdatePropertiesCallback callback, Object ctx) {
+        Map<String, String> map = new HashMap<>();
+        map.put(key, value);
+        asyncUpdateProperties(map, false, null, callback, ctx);
+    }
+
+    @Override
+    public void deleteProperty(String key) throws InterruptedException, ManagedLedgerException {
+        updateProperties(null, true, key);
+    }
+
+    @Override
+    public void asyncDeleteProperty(String key, final UpdatePropertiesCallback callback, Object ctx) {
+        asyncUpdateProperties(null, true, key, callback, ctx);
+    }
+
+    @Override
+    public void setProperties(Map<String, String> properties) throws InterruptedException, ManagedLedgerException {
+        updateProperties(properties, false, null);
+    }
+
+    @Override
+    public void asyncSetProperties(Map<String, String> properties, final UpdatePropertiesCallback callback,
+        Object ctx) {
+        asyncUpdateProperties(properties, false, null, callback, ctx);
+    }
+
+    private void updateProperties(Map<String, String> properties, boolean isDelete,
+        String deleteKey) throws InterruptedException, ManagedLedgerException {
+        final CountDownLatch latch = new CountDownLatch(1);
+        class Result {
+            ManagedLedgerException exception = null;
+        }
+        final Result result = new Result();
+        this.asyncUpdateProperties(properties, isDelete, deleteKey, new UpdatePropertiesCallback() {
+            @Override
+            public void updatePropertiesComplete(Map<String, String> properties, Object ctx) {
+                latch.countDown();
+            }
+
+            @Override
+            public void updatePropertiesFailed(ManagedLedgerException exception, Object ctx) {
+                result.exception = exception;
+                latch.countDown();
+            }
+        }, null);
+
+        if (!latch.await(AsyncOperationTimeoutSeconds, TimeUnit.SECONDS)) {
+            throw new ManagedLedgerException("Timeout during update managedLedger's properties");
+        }
+
+        if (result.exception != null) {
+            log.error("[{}] Update managedLedger's properties failed", name, result.exception);
+            throw result.exception;
+        }
+    }
+
+    private void asyncUpdateProperties(Map<String, String> properties, boolean isDelete,
+        String deleteKey, final UpdatePropertiesCallback callback, Object ctx) {
+        if (!metadataMutex.tryLock()) {
+            // Defer update for later
+            scheduledExecutor.schedule(() -> asyncUpdateProperties(properties, isDelete, deleteKey,
+                callback, ctx), 100, TimeUnit.MILLISECONDS);
+            return;
+        }
+        if (isDelete) {
+            propertiesMap.remove(deleteKey);
+        } else {
+            propertiesMap.putAll(properties);
+        }
+        store.asyncUpdateLedgerIds(name, getManagedLedgerInfo(), ledgersStat, new MetaStoreCallback<Void>() {
+            @Override
+            public void operationComplete(Void result, Stat version) {
+                ledgersStat = version;
+                callback.updatePropertiesComplete(propertiesMap, ctx);
+                metadataMutex.unlock();
+            }
+
+            @Override
+            public void operationFailed(MetaStoreException e) {
+                log.error("[{}] Update managedLedger's properties failed", name, e);
+                callback.updatePropertiesFailed(e, ctx);
+                metadataMutex.unlock();
+            }
+        });
+    }
+
+    @VisibleForTesting
+    public void setEntriesAddedCounter(long count) {
+        ENTRIES_ADDED_COUNTER_UPDATER.set(this, count);
     }
 
     private static final Logger log = LoggerFactory.getLogger(ManagedLedgerImpl.class);

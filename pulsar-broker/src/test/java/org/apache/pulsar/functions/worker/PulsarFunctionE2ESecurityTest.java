@@ -18,11 +18,33 @@
  */
 package org.apache.pulsar.functions.worker;
 
+import static org.apache.commons.lang3.StringUtils.isNotBlank;
+import static org.apache.pulsar.broker.auth.MockedPulsarServiceBaseTest.retryStrategically;
+import static org.apache.pulsar.functions.utils.functioncache.FunctionCacheEntry.JAVA_INSTANCE_JAR_PROPERTY;
+import static org.apache.pulsar.functions.worker.PulsarFunctionLocalRunTest.getPulsarApiExamplesJar;
+import static org.mockito.Mockito.spy;
+import static org.testng.Assert.assertEquals;
+import static org.testng.Assert.assertNotEquals;
+import static org.testng.Assert.assertTrue;
+import static org.testng.Assert.fail;
+
 import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
+
 import io.jsonwebtoken.SignatureAlgorithm;
-import org.apache.bookkeeper.test.PortManager;
-import org.apache.pulsar.broker.NoOpShutdownService;
+
+import java.lang.reflect.Method;
+import java.net.URL;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Properties;
+import java.util.Set;
+import java.util.concurrent.TimeUnit;
+
+import javax.crypto.SecretKey;
+
 import org.apache.pulsar.broker.PulsarService;
 import org.apache.pulsar.broker.ServiceConfiguration;
 import org.apache.pulsar.broker.ServiceConfigurationUtils;
@@ -60,26 +82,7 @@ import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
-import javax.crypto.SecretKey;
-import java.lang.reflect.Method;
-import java.net.URL;
-import java.util.Collections;
-import java.util.HashSet;
-import java.util.Map;
-import java.util.Optional;
-import java.util.Properties;
-import java.util.Set;
-import java.util.concurrent.TimeUnit;
-
-import static org.apache.commons.lang3.StringUtils.isNotBlank;
-import static org.apache.pulsar.broker.auth.MockedPulsarServiceBaseTest.retryStrategically;
-import static org.apache.pulsar.functions.utils.functioncache.FunctionCacheEntry.JAVA_INSTANCE_JAR_PROPERTY;
-import static org.mockito.Mockito.spy;
-import static org.testng.Assert.assertEquals;
-import static org.testng.Assert.assertNotEquals;
-import static org.testng.Assert.assertTrue;
-import static org.testng.Assert.fail;
-
+@Test(groups = "functions-worker")
 public class PulsarFunctionE2ESecurityTest {
 
     LocalBookkeeperEnsemble bkEnsemble;
@@ -91,7 +94,7 @@ public class PulsarFunctionE2ESecurityTest {
     PulsarAdmin superUserAdmin;
     PulsarClient pulsarClient;
     BrokerStats brokerStatsClient;
-    WorkerService functionsWorkerService;
+    PulsarWorkerService functionsWorkerService;
     final String TENANT = "external-repl-prop";
     final String TENANT2 = "tenant2";
 
@@ -100,10 +103,6 @@ public class PulsarFunctionE2ESecurityTest {
     String primaryHost;
     String workerId;
 
-    private final int ZOOKEEPER_PORT = PortManager.nextFreePort();
-    private final int brokerWebServicePort = PortManager.nextFreePort();
-    private final int brokerServicePort = PortManager.nextFreePort();
-    private final int workerServicePort = PortManager.nextFreePort();
     private SecretKey secretKey;
 
     private static final String SUBJECT = "my-test-subject";
@@ -125,18 +124,16 @@ public class PulsarFunctionE2ESecurityTest {
         log.info("--- Setting up method {} ---", method.getName());
 
         // Start local bookkeeper ensemble
-        bkEnsemble = new LocalBookkeeperEnsemble(3, ZOOKEEPER_PORT, () -> PortManager.nextFreePort());
+        bkEnsemble = new LocalBookkeeperEnsemble(3, 0, () -> 0);
         bkEnsemble.start();
-
-        brokerServiceUrl = "http://127.0.0.1:" + brokerWebServicePort;
 
         config = spy(new ServiceConfiguration());
         config.setClusterName("use");
         Set<String> superUsers = Sets.newHashSet(ADMIN_SUBJECT);
         config.setSuperUserRoles(superUsers);
-        config.setWebServicePort(Optional.of(brokerWebServicePort));
-        config.setZookeeperServers("127.0.0.1" + ":" + ZOOKEEPER_PORT);
-        config.setBrokerServicePort(Optional.of(brokerServicePort));
+        config.setWebServicePort(Optional.of(0));
+        config.setZookeeperServers("127.0.0.1" + ":" + bkEnsemble.getZookeeperPort());
+        config.setBrokerServicePort(Optional.of(0));
         config.setLoadManagerClassName(SimpleLoadManagerImpl.class.getName());
         config.setAdvertisedAddress("localhost");
         config.setAllowAutoTopicCreationType("non-partitioned");
@@ -160,11 +157,12 @@ public class PulsarFunctionE2ESecurityTest {
         config.setBrokerClientAuthenticationParameters(
                 "token:" +  adminToken);
         functionsWorkerService = createPulsarFunctionWorker(config);
-        brokerWebServiceUrl = new URL(brokerServiceUrl);
         Optional<WorkerService> functionWorkerService = Optional.of(functionsWorkerService);
-        pulsar = new PulsarService(config, functionWorkerService);
-        pulsar.setShutdownService(new NoOpShutdownService());
+        pulsar = new PulsarService(config, workerConfig, functionWorkerService, (exitCode) -> {});
         pulsar.start();
+
+        brokerServiceUrl = pulsar.getWebServiceAddress();
+        brokerWebServiceUrl = new URL(brokerServiceUrl);
 
         AuthenticationToken authToken = new AuthenticationToken();
         authToken.configure("token:" +  adminToken);
@@ -173,17 +171,18 @@ public class PulsarFunctionE2ESecurityTest {
                 PulsarAdmin.builder().serviceHttpUrl(brokerServiceUrl).authentication(authToken).build());
 
         brokerStatsClient = superUserAdmin.brokerStats();
-        primaryHost = String.format("http://%s:%d", "localhost", brokerWebServicePort);
+        primaryHost = pulsar.getWebServiceAddress();
 
         // update cluster metadata
         ClusterData clusterData = new ClusterData(brokerWebServiceUrl.toString());
         superUserAdmin.clusters().updateCluster(config.getClusterName(), clusterData);
 
-        ClientBuilder clientBuilder = PulsarClient.builder().serviceUrl(this.workerConfig.getPulsarServiceUrl());
-        if (isNotBlank(workerConfig.getClientAuthenticationPlugin())
-                && isNotBlank(workerConfig.getClientAuthenticationParameters())) {
-            clientBuilder.authentication(workerConfig.getClientAuthenticationPlugin(),
-                    workerConfig.getClientAuthenticationParameters());
+        ClientBuilder clientBuilder = PulsarClient.builder().serviceUrl(this.workerConfig.getPulsarServiceUrl())
+                .operationTimeout(1000, TimeUnit.MILLISECONDS);
+        if (isNotBlank(workerConfig.getBrokerClientAuthenticationPlugin())
+                && isNotBlank(workerConfig.getBrokerClientAuthenticationParameters())) {
+            clientBuilder.authentication(workerConfig.getBrokerClientAuthenticationPlugin(),
+                    workerConfig.getBrokerClientAuthenticationParameters());
         }
         pulsarClient = clientBuilder.build();
 
@@ -204,10 +203,12 @@ public class PulsarFunctionE2ESecurityTest {
         superUserAdmin.tenants().createTenant(TENANT2, propAdmin);
         superUserAdmin.namespaces().createNamespace( TENANT2 + "/" + NAMESPACE);
 
-        Thread.sleep(100);
+        while (!functionsWorkerService.getLeaderService().isLeader()) {
+            Thread.sleep(1000);
+        }
     }
 
-    @AfterMethod
+    @AfterMethod(alwaysRun = true)
     void shutdown() throws Exception {
         log.info("--- Shutting down ---");
         pulsarClient.close();
@@ -217,7 +218,7 @@ public class PulsarFunctionE2ESecurityTest {
         bkEnsemble.stop();
     }
 
-    private WorkerService createPulsarFunctionWorker(ServiceConfiguration config) {
+    private PulsarWorkerService createPulsarFunctionWorker(ServiceConfiguration config) {
 
         System.setProperty(JAVA_INSTANCE_JAR_PROPERTY,
                 FutureUtil.class.getProtectionDomain().getCodeSource().getLocation().getPath());
@@ -238,15 +239,15 @@ public class PulsarFunctionE2ESecurityTest {
         workerConfig.setFunctionAssignmentTopicName("assignment");
         workerConfig.setFunctionMetadataTopicName("metadata");
         workerConfig.setInstanceLivenessCheckFreqMs(100);
-        workerConfig.setWorkerPort(workerServicePort);
+        workerConfig.setWorkerPort(0);
         workerConfig.setPulsarFunctionsCluster(config.getClusterName());
         String hostname = ServiceConfigurationUtils.getDefaultOrConfiguredAddress(config.getAdvertisedAddress());
         this.workerId = "c-" + config.getClusterName() + "-fw-" + hostname + "-" + workerConfig.getWorkerPort();
         workerConfig.setWorkerHostname(hostname);
         workerConfig.setWorkerId(workerId);
 
-        workerConfig.setClientAuthenticationPlugin(AuthenticationToken.class.getName());
-        workerConfig.setClientAuthenticationParameters(
+        workerConfig.setBrokerClientAuthenticationPlugin(AuthenticationToken.class.getName());
+        workerConfig.setBrokerClientAuthenticationParameters(
                 String.format("token:%s", adminToken));
 
         workerConfig.setAuthenticationEnabled(config.isAuthenticationEnabled());
@@ -254,10 +255,17 @@ public class PulsarFunctionE2ESecurityTest {
         workerConfig.setAuthorizationEnabled(config.isAuthorizationEnabled());
         workerConfig.setAuthorizationProvider(config.getAuthorizationProvider());
 
-        return new WorkerService(workerConfig);
+        PulsarWorkerService workerService = new PulsarWorkerService();
+        workerService.init(workerConfig, null, false);
+        return workerService;
     }
 
-    protected static FunctionConfig createFunctionConfig(String tenant, String namespace, String functionName, String sourceTopic, String sinkTopic, String subscriptionName) {
+    protected static FunctionConfig createFunctionConfig(String tenant,
+                                                         String namespace,
+                                                         String functionName,
+                                                         String sourceTopic,
+                                                         String sinkTopic,
+                                                         String subscriptionName) {
 
         FunctionConfig functionConfig = new FunctionConfig();
         functionConfig.setTenant(tenant);
@@ -292,7 +300,7 @@ public class PulsarFunctionE2ESecurityTest {
                 PulsarAdmin.builder().serviceHttpUrl(brokerServiceUrl).build())
         ) {
 
-            String jarFilePathUrl = Utils.FILE + ":" + getClass().getClassLoader().getResource("pulsar-functions-api-examples.jar").getFile();
+            String jarFilePathUrl = getPulsarApiExamplesJar().toURI().toString();
 
             FunctionConfig functionConfig = createFunctionConfig(TENANT, NAMESPACE, functionName,
                     sourceTopic, sinkTopic, subscriptionName);
@@ -333,7 +341,7 @@ public class PulsarFunctionE2ESecurityTest {
                 } catch (PulsarAdminException e) {
                     return false;
                 }
-            }, 5, 150));
+            }, 50, 150));
             // validate pulsar sink consumer has started on the topic
             assertEquals(admin1.topics().getStats(sourceTopic).subscriptions.size(), 1);
 
@@ -353,7 +361,7 @@ public class PulsarFunctionE2ESecurityTest {
                     } catch (PulsarAdminException e) {
                         return false;
                     }
-                }, 5, 150);
+                }, 50, 150);
 
                 Message<String> msg = consumer.receive(5, TimeUnit.SECONDS);
                 String receivedPropertyValue = msg.getProperty(propertyKey);
@@ -385,7 +393,7 @@ public class PulsarFunctionE2ESecurityTest {
                     } catch (PulsarAdminException e) {
                         return false;
                     }
-                }, 5, 150));
+                }, 50, 150));
 
                 // test getFunctionInfo
                 try {
@@ -512,7 +520,12 @@ public class PulsarFunctionE2ESecurityTest {
 
                 }
 
-                admin1.functions().deleteFunction(TENANT, NAMESPACE, functionName);
+                try {
+                    admin1.functions().deleteFunction(TENANT, NAMESPACE, functionName);
+                } catch (PulsarAdminException e) {
+                    // This happens because the request becomes outdated. Lets retry again
+                    admin1.functions().deleteFunction(TENANT, NAMESPACE, functionName);
+                }
 
                 assertTrue(retryStrategically((test) -> {
                     try {
@@ -557,7 +570,7 @@ public class PulsarFunctionE2ESecurityTest {
                     PulsarAdmin.builder().serviceHttpUrl(brokerServiceUrl).authentication(authToken2).build())
         ) {
 
-            String jarFilePathUrl = Utils.FILE + ":" + getClass().getClassLoader().getResource("pulsar-functions-api-examples.jar").getFile();
+            String jarFilePathUrl = getPulsarApiExamplesJar().toURI().toString();
 
             FunctionConfig functionConfig = createFunctionConfig(TENANT, NAMESPACE, functionName,
                     sourceTopic, sinkTopic, subscriptionName);
@@ -604,7 +617,7 @@ public class PulsarFunctionE2ESecurityTest {
                 } catch (PulsarAdminException e) {
                     return false;
                 }
-            }, 5, 150));
+            }, 50, 150));
             // validate pulsar sink consumer has started on the topic
             assertEquals(admin1.topics().getStats(sourceTopic).subscriptions.size(), 1);
 
@@ -624,7 +637,7 @@ public class PulsarFunctionE2ESecurityTest {
                     } catch (PulsarAdminException e) {
                         return false;
                     }
-                }, 5, 150);
+                }, 50, 150);
 
                 Message<String> msg = consumer.receive(5, TimeUnit.SECONDS);
                 String receivedPropertyValue = msg.getProperty(propertyKey);
@@ -656,7 +669,7 @@ public class PulsarFunctionE2ESecurityTest {
                 } catch (PulsarAdminException e) {
                     return false;
                 }
-            }, 5, 150));
+            }, 50, 150));
 
             // test getFunctionInfo
             try {
@@ -784,7 +797,12 @@ public class PulsarFunctionE2ESecurityTest {
 
             }
 
-            admin1.functions().deleteFunction(TENANT, NAMESPACE, functionName);
+            try {
+                admin1.functions().deleteFunction(TENANT, NAMESPACE, functionName);
+            } catch (PulsarAdminException e) {
+                // This happens because the request becomes outdated. Lets retry again
+                admin1.functions().deleteFunction(TENANT, NAMESPACE, functionName);
+            }
 
             assertTrue(retryStrategically((test) -> {
                 try {
@@ -797,7 +815,7 @@ public class PulsarFunctionE2ESecurityTest {
                 } catch (PulsarAdminException e) {
                     return false;
                 }
-            }, 5, 150));
+            }, 50, 150));
         }
     }
 }

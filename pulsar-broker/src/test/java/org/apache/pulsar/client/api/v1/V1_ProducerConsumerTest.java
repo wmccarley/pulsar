@@ -74,6 +74,7 @@ import org.apache.pulsar.client.impl.TypedMessageBuilderImpl;
 import org.apache.pulsar.common.protocol.Commands;
 import org.apache.pulsar.common.naming.TopicName;
 import org.apache.pulsar.common.util.FutureUtil;
+import org.awaitility.Awaitility;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.testng.Assert;
@@ -85,6 +86,7 @@ import org.testng.annotations.Test;
 /**
  * Basic tests using the deprecated client APIs from Pulsar-1.x
  */
+@Test(groups = "flaky")
 public class V1_ProducerConsumerTest extends V1_ProducerConsumerBase {
 
     private static final Logger log = LoggerFactory.getLogger(V1_ProducerConsumerTest.class);
@@ -97,7 +99,7 @@ public class V1_ProducerConsumerTest extends V1_ProducerConsumerBase {
         super.producerBaseSetup();
     }
 
-    @AfterMethod
+    @AfterMethod(alwaysRun = true)
     @Override
     protected void cleanup() throws Exception {
         super.internalCleanup();
@@ -339,7 +341,7 @@ public class V1_ProducerConsumerTest extends V1_ProducerConsumerBase {
     public void testInvalidSequence() throws Exception {
         log.info("-- Starting {} test --", methodName);
 
-        PulsarClient client1 = PulsarClient.builder().serviceUrl("http://127.0.0.1:" + BROKER_WEBSERVICE_PORT).build();
+        PulsarClient client1 = PulsarClient.builder().serviceUrl(pulsar.getWebServiceAddress()).build();
         client1.close();
 
         try {
@@ -359,9 +361,7 @@ public class V1_ProducerConsumerTest extends V1_ProducerConsumerBase {
         } catch (PulsarClientException e) {
             Assert.assertTrue(e instanceof PulsarClientException.AlreadyClosedException);
         }
-
-
-
+        
         Consumer<byte[]> consumer = pulsarClient.newConsumer()
                 .topic("persistent://my-property/use/my-ns/my-topic6")
                 .subscriptionName("my-subscriber-name")
@@ -497,10 +497,11 @@ public class V1_ProducerConsumerTest extends V1_ProducerConsumerBase {
     public void testConcurrentConsumerReceiveWhileReconnect(int batchMessageDelayMs) throws Exception {
         final int recvQueueSize = 100;
         final int numConsumersThreads = 10;
+        String topic = "persistent://my-property/use/my-ns/my-topic-" + UUID.randomUUID().toString();
 
         String subName = UUID.randomUUID().toString();
         final Consumer<byte[]> consumer = pulsarClient.newConsumer()
-                .topic("persistent://my-property/use/my-ns/my-topic7")
+                .topic(topic)
                 .subscriptionName(subName)
                 .startMessageIdInclusive()
                 .receiverQueueSize(recvQueueSize).subscribe();
@@ -528,7 +529,7 @@ public class V1_ProducerConsumerTest extends V1_ProducerConsumerBase {
 
         // publish 100 messages so that the consumers blocked on receive() will now get the messages
         Producer<byte[]> producer = pulsarClient.newProducer()
-                .topic("persistent://my-property/use/my-ns/my-topic7")
+                .topic(topic)
                 .batchingMaxPublishDelay(BATCHING_MAX_PUBLISH_DELAY_THRESHOLD, TimeUnit.MILLISECONDS)
                 .batchingMaxMessages(5)
                 .enableBatching(batchMessageDelayMs != 0)
@@ -537,11 +538,11 @@ public class V1_ProducerConsumerTest extends V1_ProducerConsumerBase {
             String message = "my-message-" + i;
             producer.send(message.getBytes());
         }
-        Thread.sleep(500);
 
         ConsumerImpl<byte[]> consumerImpl = (ConsumerImpl<byte[]>) consumer;
         // The available permits should be 10 and num messages in the queue should be 90
-        Assert.assertEquals(consumerImpl.getAvailablePermits(), numConsumersThreads);
+        Awaitility.await().untilAsserted(() ->
+                Assert.assertEquals(consumerImpl.getAvailablePermits(), numConsumersThreads));
         Assert.assertEquals(consumerImpl.numMessagesInQueue(), recvQueueSize - numConsumersThreads);
 
         barrier.reset();
@@ -556,10 +557,10 @@ public class V1_ProducerConsumerTest extends V1_ProducerConsumerBase {
             });
         }
         barrier.await();
-        Thread.sleep(100);
 
         // The available permits should be 20 and num messages in the queue should be 80
-        Assert.assertEquals(consumerImpl.getAvailablePermits(), numConsumersThreads * 2);
+        Awaitility.await().untilAsserted(() ->
+                Assert.assertEquals(consumerImpl.getAvailablePermits(), numConsumersThreads * 2));
         Assert.assertEquals(consumerImpl.numMessagesInQueue(), recvQueueSize - (numConsumersThreads * 2));
 
         // clear the queue
@@ -590,10 +591,10 @@ public class V1_ProducerConsumerTest extends V1_ProducerConsumerBase {
         Thread.sleep(100);
 
         restartBroker();
-        Thread.sleep(2000);
 
         // The available permits should be 10 and num messages in the queue should be 90
-        Assert.assertEquals(consumerImpl.getAvailablePermits(), numConsumersThreads);
+        Awaitility.await().untilAsserted(() ->
+                Assert.assertEquals(consumerImpl.getAvailablePermits(), numConsumersThreads));
         Assert.assertEquals(consumerImpl.numMessagesInQueue(), recvQueueSize - numConsumersThreads);
         consumer.close();
 
@@ -716,6 +717,7 @@ public class V1_ProducerConsumerTest extends V1_ProducerConsumerBase {
         msg = subscriber1.receive(5, TimeUnit.SECONDS);
 
         // Verify: as active-subscriber2 has not consumed messages: EntryCache must have those entries in cache
+        retryStrategically((test) -> entryCache.getSize() > 0, 10, 100);
         assertTrue(entryCache.getSize() != 0);
 
         // 3.b Close subscriber2: which will trigger cache to clear the cache
@@ -2074,7 +2076,7 @@ public class V1_ProducerConsumerTest extends V1_ProducerConsumerBase {
         log.info("-- Exiting {} test --", methodName);
     }
 
-    @Test(groups = "encryption")
+    @Test
     public void testECDSAEncryption() throws Exception {
         log.info("-- Starting {} test --", methodName);
 
@@ -2150,7 +2152,7 @@ public class V1_ProducerConsumerTest extends V1_ProducerConsumerBase {
         log.info("-- Exiting {} test --", methodName);
     }
 
-    @Test(groups = "encryption")
+    @Test
     public void testRSAEncryption() throws Exception {
         log.info("-- Starting {} test --", methodName);
 
@@ -2235,7 +2237,7 @@ public class V1_ProducerConsumerTest extends V1_ProducerConsumerBase {
         log.info("-- Exiting {} test --", methodName);
     }
 
-    @Test(groups = "encryption")
+    @Test
     public void testEncryptionFailure() throws Exception {
         log.info("-- Starting {} test --", methodName);
 
@@ -2366,7 +2368,7 @@ public class V1_ProducerConsumerTest extends V1_ProducerConsumerBase {
 
         // Receive should proceed and discard encrypted messages
         msg = consumer.receive(5, TimeUnit.SECONDS);
-        Assert.assertNull(msg, "Message received even aftet ConsumerCryptoFailureAction.DISCARD is set.");
+        Assert.assertNull(msg, "Message received even after ConsumerCryptoFailureAction.DISCARD is set.");
 
         log.info("-- Exiting {} test --", methodName);
     }

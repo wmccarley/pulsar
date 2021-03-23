@@ -18,20 +18,21 @@
  */
 package org.apache.pulsar.client.impl.schema;
 
-import static com.google.common.base.Preconditions.checkState;
-
 import lombok.extern.slf4j.Slf4j;
 import org.apache.pulsar.client.api.Schema;
 import org.apache.pulsar.client.api.SchemaSerializationException;
 import org.apache.pulsar.client.api.schema.GenericRecord;
 import org.apache.pulsar.client.api.schema.GenericSchema;
 import org.apache.pulsar.client.api.schema.SchemaInfoProvider;
-import org.apache.pulsar.client.impl.schema.generic.GenericSchemaImpl;
+import org.apache.pulsar.client.impl.schema.generic.GenericAvroSchema;
+import org.apache.pulsar.client.impl.schema.generic.GenericJsonSchema;
+import org.apache.pulsar.client.impl.schema.generic.GenericProtobufNativeSchema;
 import org.apache.pulsar.common.schema.KeyValue;
 import org.apache.pulsar.common.schema.SchemaInfo;
-import org.apache.pulsar.common.schema.SchemaType;
 
 import java.util.concurrent.ExecutionException;
+
+import static com.google.common.base.Preconditions.checkState;
 
 /**
  * Auto detect schema.
@@ -132,14 +133,35 @@ public class AutoConsumeSchema implements Schema<GenericRecord> {
         }
     }
 
-    private GenericSchema generateSchema(SchemaInfo schemaInfo) {
-        if (schemaInfo.getType() != SchemaType.AVRO
-            && schemaInfo.getType() != SchemaType.JSON) {
-            throw new RuntimeException("Currently auto consume only works for topics with avro or json schemas");
+    @Override
+    public Schema<GenericRecord> clone() {
+        Schema<GenericRecord> schema = Schema.AUTO_CONSUME();
+        if (this.schema != null) {
+            schema.configureSchemaInfo(topicName, componentName, this.schema.getSchemaInfo());
+        } else {
+            schema.configureSchemaInfo(topicName, componentName, null);
         }
+        if (schemaInfoProvider != null) {
+            schema.setSchemaInfoProvider(schemaInfoProvider);
+        }
+        return schema;
+    }
+
+    private GenericSchema generateSchema(SchemaInfo schemaInfo) {
         // when using `AutoConsumeSchema`, we use the schema associated with the messages as schema reader
         // to decode the messages.
-        return GenericSchemaImpl.of(schemaInfo, false /*useProvidedSchemaAsReaderSchema*/);
+        final boolean useProvidedSchemaAsReaderSchema = false;
+        switch (schemaInfo.getType()) {
+            case JSON:
+                return GenericJsonSchema.of(schemaInfo,useProvidedSchemaAsReaderSchema);
+            case AVRO:
+                return GenericAvroSchema.of(schemaInfo,useProvidedSchemaAsReaderSchema);
+            case PROTOBUF_NATIVE:
+                return GenericProtobufNativeSchema.of(schemaInfo, useProvidedSchemaAsReaderSchema);
+            default:
+                throw new IllegalArgumentException("Currently auto consume works for type '"
+                        + schemaInfo.getType() + "' is not supported yet");
+        }
     }
 
     public static Schema<?> getSchema(SchemaInfo schemaInfo) {
@@ -168,9 +190,20 @@ public class AutoConsumeSchema implements Schema<GenericRecord> {
                 return TimeSchema.of();
             case TIMESTAMP:
                 return TimestampSchema.of();
+            case INSTANT:
+                return InstantSchema.of();
+            case LOCAL_DATE:
+                return LocalDateSchema.of();
+            case LOCAL_TIME:
+                return LocalTimeSchema.of();
+            case LOCAL_DATE_TIME:
+                return LocalDateTimeSchema.of();
             case JSON:
+                return GenericJsonSchema.of(schemaInfo);
             case AVRO:
-                return GenericSchemaImpl.of(schemaInfo);
+                return GenericAvroSchema.of(schemaInfo);
+            case PROTOBUF_NATIVE:
+                return GenericProtobufNativeSchema.of(schemaInfo);
             case KEY_VALUE:
                 KeyValue<SchemaInfo, SchemaInfo> kvSchemaInfo =
                     KeyValueSchemaInfo.decodeKeyValueSchemaInfo(schemaInfo);

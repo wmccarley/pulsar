@@ -19,14 +19,19 @@
 package org.apache.pulsar.functions.api;
 
 import org.apache.pulsar.client.api.Message;
+import org.apache.pulsar.client.api.Schema;
 
 import java.util.Collections;
 import java.util.Map;
 import java.util.Optional;
+import org.apache.pulsar.common.classification.InterfaceAudience;
+import org.apache.pulsar.common.classification.InterfaceStability;
 
 /**
  * Pulsar Connect's Record interface. Record encapsulates the information about a record being read from a Source.
  */
+@InterfaceAudience.Public
+@InterfaceStability.Stable
 public interface Record<T> {
 
     /**
@@ -41,6 +46,10 @@ public interface Record<T> {
      */
     default Optional<String> getKey() {
         return Optional.empty();
+    }
+
+    default Schema<T> getSchema() {
+        return null;
     }
 
     /**

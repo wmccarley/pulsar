@@ -19,7 +19,6 @@
 package org.apache.pulsar.common.policies.data;
 
 import static com.google.common.base.Preconditions.checkNotNull;
-
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import java.util.List;
@@ -43,8 +42,23 @@ public class TopicStats {
     /** Total throughput of messages dispatched for the topic (byte/s). */
     public double msgThroughputOut;
 
+    /** Total bytes published to the topic (bytes). */
+    public long bytesInCounter;
+
+    /** Total messages published to the topic (msg). */
+    public long msgInCounter;
+
+    /** Total bytes delivered to consumer (bytes). */
+    public long bytesOutCounter;
+
+    /** Total messages delivered to consumer (msg). */
+    public long msgOutCounter;
+
     /** Average size of published messages (bytes). */
     public double averageMsgSize;
+
+    /** Topic has chunked message published on it. */
+    public boolean msgChunkPublished;
 
     /** Space used to store the messages for the topic (bytes). */
     public long storageSize;
@@ -52,8 +66,13 @@ public class TopicStats {
     /** Get estimated total unconsumed or backlog size in bytes. */
     public long backlogSize;
 
+    /** Space used to store the offloaded messages for the topic/. */
+    public long offloadedStorageSize;
+
     /** List of connected publishers on this topic w/ their stats. */
     public List<PublisherStats> publishers;
+
+    public int waitingPublishers;
 
     /** Map of subscriptions with their individual statistics. */
     public Map<String, SubscriptionStats> subscriptions;
@@ -62,6 +81,15 @@ public class TopicStats {
     public Map<String, ReplicatorStats> replication;
 
     public String deduplicationStatus;
+
+    /** The topic epoch or empty if not set. */
+    public Long topicEpoch;
+
+    /** The number of non-contiguous deleted messages ranges. */
+    public int nonContiguousDeletedMessagesRanges;
+
+    /** The serialized size of non-contiguous deleted messages ranges. */
+    public int nonContiguousDeletedMessagesRangesSerializedSize;
 
     public TopicStats() {
         this.publishers = Lists.newArrayList();
@@ -78,10 +106,19 @@ public class TopicStats {
         this.averageMsgSize = 0;
         this.storageSize = 0;
         this.backlogSize = 0;
+        this.bytesInCounter = 0;
+        this.msgInCounter = 0;
+        this.bytesOutCounter = 0;
+        this.msgOutCounter = 0;
         this.publishers.clear();
         this.subscriptions.clear();
+        this.waitingPublishers = 0;
         this.replication.clear();
         this.deduplicationStatus = null;
+        this.topicEpoch = null;
+        this.nonContiguousDeletedMessagesRanges = 0;
+        this.nonContiguousDeletedMessagesRangesSerializedSize = 0;
+        this.offloadedStorageSize = 0;
     }
 
     // if the stats are added for the 1st time, we will need to make a copy of these stats and add it to the current
@@ -93,10 +130,18 @@ public class TopicStats {
         this.msgThroughputIn += stats.msgThroughputIn;
         this.msgRateOut += stats.msgRateOut;
         this.msgThroughputOut += stats.msgThroughputOut;
+        this.bytesInCounter += stats.bytesInCounter;
+        this.msgInCounter += stats.msgInCounter;
+        this.bytesOutCounter += stats.bytesOutCounter;
+        this.msgOutCounter += stats.msgOutCounter;
+        this.waitingPublishers += stats.waitingPublishers;
         double newAverageMsgSize = (this.averageMsgSize * (this.count - 1) + stats.averageMsgSize) / this.count;
         this.averageMsgSize = newAverageMsgSize;
         this.storageSize += stats.storageSize;
         this.backlogSize += stats.backlogSize;
+        this.offloadedStorageSize += stats.offloadedStorageSize;
+        this.nonContiguousDeletedMessagesRanges += stats.nonContiguousDeletedMessagesRanges;
+        this.nonContiguousDeletedMessagesRangesSerializedSize += stats.nonContiguousDeletedMessagesRangesSerializedSize;
         if (this.publishers.size() != stats.publishers.size()) {
             for (int i = 0; i < stats.publishers.size(); i++) {
                 PublisherStats publisherStats = new PublisherStats();
@@ -114,7 +159,12 @@ public class TopicStats {
             }
         } else {
             for (String subscription : stats.subscriptions.keySet()) {
-                this.subscriptions.get(subscription).add(stats.subscriptions.get(subscription));
+                if (this.subscriptions.get(subscription) != null) {
+                    this.subscriptions.get(subscription).add(stats.subscriptions.get(subscription));
+                } else {
+                    SubscriptionStats subscriptionStats = new SubscriptionStats();
+                    this.subscriptions.put(subscription, subscriptionStats.add(stats.subscriptions.get(subscription)));
+                }
             }
         }
         if (this.replication.size() != stats.replication.size()) {
@@ -124,7 +174,12 @@ public class TopicStats {
             }
         } else {
             for (String repl : stats.replication.keySet()) {
-                this.replication.get(repl).add(stats.replication.get(repl));
+                if (this.replication.get(repl) != null) {
+                    this.replication.get(repl).add(stats.replication.get(repl));
+                } else {
+                    ReplicatorStats replStats = new ReplicatorStats();
+                    this.replication.put(repl, replStats.add(stats.replication.get(repl)));
+                }
             }
         }
         return this;

@@ -21,20 +21,24 @@ package org.apache.pulsar.io.core;
 import java.util.Map;
 import java.util.concurrent.LinkedBlockingQueue;
 
+import org.apache.pulsar.common.classification.InterfaceAudience;
+import org.apache.pulsar.common.classification.InterfaceStability;
 import org.apache.pulsar.functions.api.Record;
 
 /**
  * Pulsar's Push Source interface. PushSource read data from
- * external sources(database changes, twitter firehose, etc)
+ * external sources (database changes, twitter firehose, etc)
  * and publish to a Pulsar topic. The reason its called Push is
  * because PushSources get passed a consumer that they
  * invoke whenever they have data to be published to Pulsar.
  * The lifecycle of a PushSource is to open it passing any config needed
  * by it to initialize(like open network connection, authenticate, etc).
- * A consumer  is then to it which is invoked by the source whenever
+ * A consumer is then to it which is invoked by the source whenever
  * there is data to be published. Once all data has been read, one can use close
  * at the end of the session to do any cleanup
  */
+@InterfaceAudience.Public
+@InterfaceStability.Stable
 public abstract class PushSource<T> implements Source<T> {
 
     private LinkedBlockingQueue<Record<T>> queue;
@@ -50,10 +54,10 @@ public abstract class PushSource<T> implements Source<T> {
     }
 
     /**
-     * Open connector with configuration
+     * Open connector with configuration.
      *
      * @param config initialization config
-     * @param sourceContext
+     * @param sourceContext environment where the source connector is running
      * @throws Exception IO type exceptions when opening a connector
      */
     abstract public void open(Map<String, Object> config, SourceContext sourceContext) throws Exception;
@@ -61,7 +65,8 @@ public abstract class PushSource<T> implements Source<T> {
     /**
      * Attach a consumer function to this Source. This is invoked by the implementation
      * to pass messages whenever there is data to be pushed to Pulsar.
-     * @param consumer
+     *
+     * @param record next message from source which should be sent to a Pulsar topic
      */
     public void consume(Record<T> record) {
         try {

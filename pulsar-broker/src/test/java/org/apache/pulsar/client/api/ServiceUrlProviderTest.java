@@ -21,7 +21,8 @@ package org.apache.pulsar.client.api;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 
-import org.apache.bookkeeper.test.PortManager;
+import lombok.extern.slf4j.Slf4j;
+
 import org.apache.pulsar.broker.PulsarService;
 import org.apache.pulsar.client.impl.ConsumerImpl;
 import org.apache.pulsar.client.impl.ProducerImpl;
@@ -31,9 +32,8 @@ import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
 
-import lombok.extern.slf4j.Slf4j;
-
 @Slf4j
+@Test(groups = "broker-api")
 public class ServiceUrlProviderTest extends ProducerConsumerBase {
 
     @BeforeClass
@@ -44,7 +44,7 @@ public class ServiceUrlProviderTest extends ProducerConsumerBase {
 
     }
 
-    @AfterClass
+    @AfterClass(alwaysRun = true)
     @Override
     protected void cleanup() throws Exception {
         super.internalCleanup();
@@ -104,8 +104,8 @@ public class ServiceUrlProviderTest extends ProducerConsumerBase {
                 .subscribe();
 
         PulsarService pulsarService1 = pulsar;
-        conf.setBrokerServicePort(Optional.ofNullable(PortManager.nextFreePort()));
-        conf.setWebServicePort(Optional.ofNullable(PortManager.nextFreePort()));
+        conf.setBrokerServicePort(Optional.of(0));
+        conf.setWebServicePort(Optional.of(0));
         restartBroker();
         PulsarService pulsarService2 = pulsar;
 
@@ -134,11 +134,11 @@ public class ServiceUrlProviderTest extends ProducerConsumerBase {
         client.close();
     }
 
-    class TestServiceUrlProvider implements ServiceUrlProvider {
+    static class TestServiceUrlProvider implements ServiceUrlProvider {
 
         private PulsarClient pulsarClient;
 
-        private String serviceUrl;
+        private final String serviceUrl;
 
         public TestServiceUrlProvider(String serviceUrl) {
             this.serviceUrl = serviceUrl;
@@ -159,7 +159,7 @@ public class ServiceUrlProviderTest extends ProducerConsumerBase {
         }
     }
 
-    class AutoChangedServiceUrlProvider extends TestServiceUrlProvider {
+    static class AutoChangedServiceUrlProvider extends TestServiceUrlProvider {
 
         public AutoChangedServiceUrlProvider(String serviceUrl) {
             super(serviceUrl);

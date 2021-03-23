@@ -21,7 +21,6 @@ package org.apache.pulsar.zookeeper;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionException;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.apache.pulsar.zookeeper.ZooKeeperCache.CacheUpdater;
@@ -73,10 +72,6 @@ public class ZooKeeperChildrenCache implements Watcher, CacheUpdater<Set<String>
 
     public void clear() {
         cache.invalidateChildren(path);
-    }
-
-    public void clearTree() {
-        cache.invalidateRoot(path);
     }
 
     @Override

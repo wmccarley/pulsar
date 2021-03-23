@@ -27,8 +27,11 @@ namespace pulsar {
 struct ConsumerConfigurationImpl {
     SchemaInfo schemaInfo;
     long unAckedMessagesTimeoutMs;
+    long tickDurationInMs;
 
     long negativeAckRedeliveryDelayMs;
+    long ackGroupingTimeMs;
+    long ackGroupingMaxSize;
     ConsumerType consumerType;
     MessageListener messageListener;
     bool hasMessageListener;
@@ -42,10 +45,15 @@ struct ConsumerConfigurationImpl {
     InitialPosition subscriptionInitialPosition;
     int patternAutoDiscoveryPeriod;
     std::map<std::string, std::string> properties;
+    KeySharedPolicy keySharedPolicy;
+
     ConsumerConfigurationImpl()
         : schemaInfo(),
           unAckedMessagesTimeoutMs(0),
+          tickDurationInMs(1000),
           negativeAckRedeliveryDelayMs(60000),
+          ackGroupingTimeMs(100),
+          ackGroupingMaxSize(1000),
           consumerType(ConsumerExclusive),
           messageListener(),
           hasMessageListener(false),
@@ -57,7 +65,8 @@ struct ConsumerConfigurationImpl {
           readCompacted(false),
           subscriptionInitialPosition(InitialPosition::InitialPositionLatest),
           patternAutoDiscoveryPeriod(60),
-          properties() {}
+          properties(),
+          keySharedPolicy() {}
 };
 }  // namespace pulsar
 #endif /* LIB_CONSUMERCONFIGURATIONIMPL_H_ */

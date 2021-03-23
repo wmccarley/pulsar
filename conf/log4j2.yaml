@@ -33,19 +33,19 @@ Configuration:
       - name: "pulsar.log.appender"
         value: "RoutingAppender"
       - name: "pulsar.log.root.level"
-        value: "info"
+        value: "debug"
       - name: "pulsar.log.level"
         value: "info"
       - name: "pulsar.routing.appender.default"
         value: "Console"
 
   # Example: logger-filter script
-  Scripts:
-    ScriptFile:
-      name: filter.js
-      language: JavaScript
-      path: ./conf/log4j2-scripts/filter.js
-      charset: UTF-8
+#  Scripts:
+#    ScriptFile:
+#      name: filter.js
+#      language: JavaScript
+#      path: ./conf/log4j2-scripts/filter.js
+#      charset: UTF-8
 
   Appenders:
 

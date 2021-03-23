@@ -19,10 +19,10 @@
 package org.apache.pulsar.common.util.collections;
 
 import static com.google.common.base.Preconditions.checkArgument;
-
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 
 /**
  * An unbounded priority queue based on a min heap where values are composed of pairs of longs.
@@ -37,6 +37,8 @@ public class GrowablePriorityLongPairQueue {
 
     private long[] data;
     private int capacity;
+    private static final AtomicIntegerFieldUpdater<GrowablePriorityLongPairQueue> SIZE_UPDATER =
+            AtomicIntegerFieldUpdater.newUpdater(GrowablePriorityLongPairQueue.class, "size");
     private volatile int size = 0;
     private static final long EmptyItem = -1L;
 
@@ -83,7 +85,7 @@ public class GrowablePriorityLongPairQueue {
             loc = parent(loc);
         }
 
-        this.size++;
+        SIZE_UPDATER.incrementAndGet(this);
 
     }
 
@@ -204,7 +206,7 @@ public class GrowablePriorityLongPairQueue {
             LongPair item = new LongPair(data[index], data[index + 1]);
             data[index] = EmptyItem;
             data[index + 1] = EmptyItem;
-            --this.size;
+            SIZE_UPDATER.decrementAndGet(this);
             int lastIndex = this.size << 1;
             swap(index, lastIndex);
             minHeapify(index, lastIndex - 2);

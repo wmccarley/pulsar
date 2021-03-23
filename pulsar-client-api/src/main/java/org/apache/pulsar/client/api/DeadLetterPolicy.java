@@ -20,6 +20,8 @@ package org.apache.pulsar.client.api;
 
 import lombok.Builder;
 import lombok.Data;
+import org.apache.pulsar.common.classification.InterfaceAudience;
+import org.apache.pulsar.common.classification.InterfaceStability;
 
 /**
  * Configuration for the "dead letter queue" feature in consumer.
@@ -28,6 +30,8 @@ import lombok.Data;
  */
 @Builder
 @Data
+@InterfaceAudience.Public
+@InterfaceStability.Stable
 public class DeadLetterPolicy {
 
     /**
@@ -36,7 +40,12 @@ public class DeadLetterPolicy {
     private int maxRedeliverCount;
 
     /**
-     * Name of the topic where the failing messages will be sent.
+     * Name of the retry topic where the failing messages will be sent.
+     */
+    private String retryLetterTopic;
+
+    /**
+     * Name of the dead topic where the failing messages will be sent.
      */
     private String deadLetterTopic;
 

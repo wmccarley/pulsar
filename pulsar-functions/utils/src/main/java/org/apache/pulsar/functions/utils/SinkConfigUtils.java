@@ -25,24 +25,27 @@ import com.google.gson.reflect.TypeToken;
 import lombok.AllArgsConstructor;
 import lombok.Getter;
 import lombok.Setter;
+import lombok.SneakyThrows;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang.StringUtils;
 import org.apache.pulsar.client.api.SubscriptionInitialPosition;
 import org.apache.pulsar.common.functions.ConsumerConfig;
 import org.apache.pulsar.common.functions.FunctionConfig;
 import org.apache.pulsar.common.functions.Resources;
+import org.apache.pulsar.common.io.ConnectorDefinition;
 import org.apache.pulsar.common.io.SinkConfig;
+import org.apache.pulsar.common.io.SourceConfig;
 import org.apache.pulsar.common.naming.TopicName;
+import org.apache.pulsar.common.nar.NarClassLoader;
 import org.apache.pulsar.common.util.ObjectMapperFactory;
+import org.apache.pulsar.config.validation.ConfigValidation;
 import org.apache.pulsar.functions.api.utils.IdentityFunction;
 import org.apache.pulsar.functions.proto.Function;
 import org.apache.pulsar.functions.proto.Function.FunctionDetails;
 import org.apache.pulsar.functions.utils.io.ConnectorUtils;
 
-import java.io.File;
 import java.io.IOException;
 import java.lang.reflect.Type;
-import java.nio.file.Path;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.LinkedList;
@@ -130,15 +133,19 @@ public class SinkConfigUtils {
             sinkConfig.getInputSpecs().forEach((topic, spec) -> {
                 Function.ConsumerSpec.Builder bldr = Function.ConsumerSpec.newBuilder()
                         .setIsRegexPattern(spec.isRegexPattern());
-                if (!StringUtils.isBlank(spec.getSchemaType())) {
+                if (StringUtils.isNotBlank(spec.getSchemaType())) {
                     bldr.setSchemaType(spec.getSchemaType());
-                } else if (!StringUtils.isBlank(spec.getSerdeClassName())) {
+                } else if (StringUtils.isNotBlank(spec.getSerdeClassName())) {
                     bldr.setSerdeClassName(spec.getSerdeClassName());
                 }
                 if (spec.getReceiverQueueSize() != null) {
                     bldr.setReceiverQueueSize(Function.ConsumerSpec.ReceiverQueueSize.newBuilder()
                             .setValue(spec.getReceiverQueueSize()).build());
                 }
+                if (spec.getCryptoConfig() != null) {
+                    bldr.setCryptoSpec(CryptoUtils.convert(spec.getCryptoConfig()));
+                }
+                bldr.putAllConsumerProperties(spec.getConsumerProperties());
                 sourceSpecBuilder.putInputSpecs(topic, bldr.build());
             });
         }
@@ -164,6 +171,9 @@ public class SinkConfigUtils {
         if (sinkConfig.getTimeoutMs() != null) {
             sourceSpecBuilder.setTimeoutMs(sinkConfig.getTimeoutMs());
         }
+        if (sinkConfig.getNegativeAckRedeliveryDelayMs() != null && sinkConfig.getNegativeAckRedeliveryDelayMs() > 0) {
+            sourceSpecBuilder.setNegativeAckRedeliveryDelayMs(sinkConfig.getNegativeAckRedeliveryDelayMs());
+        }
 
         if (sinkConfig.getCleanupSubscription() != null) {
             sourceSpecBuilder.setCleanupSubscription(sinkConfig.getCleanupSubscription());
@@ -178,6 +188,15 @@ public class SinkConfigUtils {
         }
 
         functionDetailsBuilder.setSource(sourceSpecBuilder);
+
+        if (sinkConfig.getMaxMessageRetries() != null && sinkConfig.getMaxMessageRetries() > 0) {
+            Function.RetryDetails.Builder retryDetails = Function.RetryDetails.newBuilder();
+            retryDetails.setMaxMessageRetries(sinkConfig.getMaxMessageRetries());
+            if (StringUtils.isNotBlank(sinkConfig.getDeadLetterTopic())) {
+                retryDetails.setDeadLetterTopic(sinkConfig.getDeadLetterTopic());
+            }
+            functionDetailsBuilder.setRetryDetails(retryDetails);
+        }
 
         // set up sink spec
         Function.SinkSpec.Builder sinkSpecBuilder = Function.SinkSpec.newBuilder();
@@ -242,7 +261,11 @@ public class SinkConfigUtils {
             if (input.getValue().hasReceiverQueueSize()) {
                 consumerConfig.setReceiverQueueSize(input.getValue().getReceiverQueueSize().getValue());
             }
+            if (input.getValue().hasCryptoSpec()) {
+                consumerConfig.setCryptoConfig(CryptoUtils.convertFromSpec(input.getValue().getCryptoSpec()));
+            }
             consumerConfig.setRegexPattern(input.getValue().getIsRegexPattern());
+            consumerConfig.setConsumerProperties(input.getValue().getConsumerPropertiesMap());
             consumerConfigMap.put(input.getKey(), consumerConfig);
         }
         sinkConfig.setInputSpecs(consumerConfigMap);
@@ -259,6 +282,9 @@ public class SinkConfigUtils {
         sinkConfig.setAutoAck(functionDetails.getAutoAck());
         if (functionDetails.getSource().getTimeoutMs() != 0) {
             sinkConfig.setTimeoutMs(functionDetails.getSource().getTimeoutMs());
+        }
+        if (functionDetails.getSource().getNegativeAckRedeliveryDelayMs() > 0) {
+            sinkConfig.setNegativeAckRedeliveryDelayMs(functionDetails.getSource().getNegativeAckRedeliveryDelayMs());
         }
         if (!isEmpty(functionDetails.getSink().getClassName())) {
             sinkConfig.setClassName(functionDetails.getSink().getClassName());
@@ -297,12 +323,19 @@ public class SinkConfigUtils {
         if (!isEmpty(functionDetails.getCustomRuntimeOptions())) {
             sinkConfig.setCustomRuntimeOptions(functionDetails.getCustomRuntimeOptions());
         }
+        if (functionDetails.hasRetryDetails()) {
+            sinkConfig.setMaxMessageRetries(functionDetails.getRetryDetails().getMaxMessageRetries());
+            if (StringUtils.isNotBlank(functionDetails.getRetryDetails().getDeadLetterTopic())) {
+                sinkConfig.setDeadLetterTopic(functionDetails.getRetryDetails().getDeadLetterTopic());
+            }
+        }
 
         return sinkConfig;
     }
 
-    public static ExtractedSinkDetails validate(SinkConfig sinkConfig, Path archivePath,
-                                          File sinkPackageFile) {
+    public static ExtractedSinkDetails validateAndExtractDetails(SinkConfig sinkConfig,
+                                                                 ClassLoader sinkClassLoader,
+                                                                 boolean validateConnectorConfig) {
         if (isEmpty(sinkConfig.getTenant())) {
             throw new IllegalArgumentException("Sink tenant cannot be null");
         }
@@ -337,105 +370,38 @@ public class SinkConfigUtils {
             throw new IllegalArgumentException("Sink timeout must be a positive number");
         }
 
-        if (archivePath == null && sinkPackageFile == null) {
-            throw new IllegalArgumentException("Sink package is not provided");
-        }
-
-        Class<?> typeArg;
-        ClassLoader classLoader;
         String sinkClassName = sinkConfig.getClassName();
-        ClassLoader jarClassLoader = null;
-        ClassLoader narClassLoader = null;
-
-        Exception jarClassLoaderException = null;
-        Exception narClassLoaderException = null;
-
-        try {
-            jarClassLoader = FunctionCommon.extractClassLoader(archivePath, sinkPackageFile);
-        } catch (Exception e) {
-            jarClassLoaderException = e;
-        }
-        try {
-            narClassLoader = FunctionCommon.extractNarClassLoader(archivePath, sinkPackageFile);
-        } catch (Exception e) {
-            narClassLoaderException = e;
-        }
-
-        // if sink class name is not provided, we can only try to load archive as a NAR
-        if (isEmpty(sinkClassName)) {
-            if (narClassLoader == null) {
-                throw new IllegalArgumentException("Sink package does not have the correct format. " +
-                        "Pulsar cannot determine if the package is a NAR package or JAR package." +
-                        "Sink classname is not provided and attempts to load it as a NAR package produced error: "
-                        + narClassLoaderException.getMessage());
-            }
+        // if class name in sink config is not set, this should be a built-in sink
+        // thus we should try to find it class name in the NAR service definition
+        if (sinkClassName == null) {
             try {
-                sinkClassName = ConnectorUtils.getIOSinkClass(narClassLoader);
+                sinkClassName = ConnectorUtils.getIOSinkClass((NarClassLoader) sinkClassLoader);
             } catch (IOException e) {
-                throw new IllegalArgumentException("Failed to extract Sink class from archive", e);
-            }
-            try {
-                typeArg = getSinkType(sinkClassName, narClassLoader);
-                classLoader = narClassLoader;
-            } catch (ClassNotFoundException e) {
-                throw new IllegalArgumentException(
-                        String.format("Sink class %s must be in class path", sinkClassName), e);
-            }
-
-        } else {
-            // if sink class name is provided, we need to try to load it as a JAR and as a NAR.
-            if (jarClassLoader != null) {
-                try {
-                    typeArg = getSinkType(sinkClassName, jarClassLoader);
-                    classLoader = jarClassLoader;
-                } catch (ClassNotFoundException e) {
-                    // class not found in JAR try loading as a NAR and searching for the class
-                    if (narClassLoader != null) {
-                        try {
-                            typeArg = getSinkType(sinkClassName, narClassLoader);
-                            classLoader = narClassLoader;
-                        } catch (ClassNotFoundException e1) {
-                            throw new IllegalArgumentException(
-                                    String.format("Sink class %s must be in class path", sinkClassName), e1);
-                        }
-                    } else {
-                        throw new IllegalArgumentException(
-                                String.format("Sink class %s must be in class path", sinkClassName), e);
-                    }
-                }
-            } else if (narClassLoader != null) {
-                try {
-                    typeArg = getSinkType(sinkClassName, narClassLoader);
-                    classLoader = narClassLoader;
-                } catch (ClassNotFoundException e1) {
-                    throw new IllegalArgumentException(
-                            String.format("Sink class %s must be in class path", sinkClassName), e1);
-                }
-            } else {
-                StringBuilder errorMsg = new StringBuilder("Sink package does not have the correct format." +
-                        " Pulsar cannot determine if the package is a NAR package or JAR package.");
-
-                if (jarClassLoaderException != null) {
-                    errorMsg.append("Attempts to load it as a JAR package produced error: " + jarClassLoaderException.getMessage());
-                }
-
-                if (narClassLoaderException != null) {
-                    errorMsg.append("Attempts to load it as a NAR package produced error: " + narClassLoaderException.getMessage());
-                }
-
-                throw new IllegalArgumentException(errorMsg.toString());
+                throw new IllegalArgumentException("Failed to extract sink class from archive", e);
             }
         }
+
+        // check if sink implements the correct interfaces
+        Class sinkClass;
+        try {
+            sinkClass = sinkClassLoader.loadClass(sinkClassName);
+        } catch (ClassNotFoundException e) {
+            throw new IllegalArgumentException(
+                    String.format("Sink class %s not found in class loader", sinkClassName, e));
+        }
+
+        // extract type from sink class
+        Class<?> typeArg = getSinkType(sinkClass);
 
         if (sinkConfig.getTopicToSerdeClassName() != null) {
            for (String serdeClassName : sinkConfig.getTopicToSerdeClassName().values()) {
-               ValidatorUtils.validateSerde(serdeClassName, typeArg, classLoader, true);
+               ValidatorUtils.validateSerde(serdeClassName, typeArg, sinkClassLoader, true);
            }
         }
 
         if (sinkConfig.getTopicToSchemaType() != null) {
             for (String schemaType : sinkConfig.getTopicToSchemaType().values()) {
-                ValidatorUtils.validateSchema(schemaType, typeArg, classLoader, true);
+                ValidatorUtils.validateSchema(schemaType, typeArg, sinkClassLoader, true);
             }
         }
 
@@ -448,13 +414,22 @@ public class SinkConfigUtils {
                     throw new IllegalArgumentException("Only one of serdeClassName or schemaType should be set");
                 }
                 if (!isEmpty(consumerSpec.getSerdeClassName())) {
-                    ValidatorUtils.validateSerde(consumerSpec.getSerdeClassName(), typeArg, classLoader, true);
+                    ValidatorUtils.validateSerde(consumerSpec.getSerdeClassName(), typeArg, sinkClassLoader, true);
                 }
                 if (!isEmpty(consumerSpec.getSchemaType())) {
-                    ValidatorUtils.validateSchema(consumerSpec.getSchemaType(), typeArg, classLoader, true);
+                    ValidatorUtils.validateSchema(consumerSpec.getSchemaType(), typeArg, sinkClassLoader, true);
+                }
+                if (consumerSpec.getCryptoConfig() != null) {
+                    ValidatorUtils.validateCryptoKeyReader(consumerSpec.getCryptoConfig(), sinkClassLoader, false);
                 }
             }
         }
+
+        // validate user defined config if enabled and sink is loaded from NAR
+        if (validateConnectorConfig && sinkClassLoader instanceof NarClassLoader) {
+            validateSinkConfig(sinkConfig, (NarClassLoader) sinkClassLoader);
+        }
+
         return new ExtractedSinkDetails(sinkClassName, typeArg.getName());
     }
 
@@ -478,8 +453,15 @@ public class SinkConfigUtils {
         return retval;
     }
 
+    @SneakyThrows
+    public static SinkConfig clone(SinkConfig sinkConfig) {
+        return ObjectMapperFactory.getThreadLocal().readValue(
+                ObjectMapperFactory.getThreadLocal().writeValueAsBytes(sinkConfig), SinkConfig.class);
+    }
+
     public static SinkConfig validateUpdate(SinkConfig existingConfig, SinkConfig newConfig) {
-        SinkConfig mergedConfig = existingConfig.toBuilder().build();
+        SinkConfig mergedConfig = clone(existingConfig);
+
         if (!existingConfig.getTenant().equals(newConfig.getTenant())) {
             throw new IllegalArgumentException("Tenants differ");
         }
@@ -535,6 +517,7 @@ public class SinkConfigUtils {
             });
         }
         if (!newConfig.getInputSpecs().isEmpty()) {
+            SinkConfig finalMergedConfig = mergedConfig;
             newConfig.getInputSpecs().forEach((topicName, consumerConfig) -> {
                 if (!existingConfig.getInputSpecs().containsKey(topicName)) {
                     throw new IllegalArgumentException("Input Topics cannot be altered");
@@ -542,11 +525,11 @@ public class SinkConfigUtils {
                 if (consumerConfig.isRegexPattern() != existingConfig.getInputSpecs().get(topicName).isRegexPattern()) {
                     throw new IllegalArgumentException("isRegexPattern for input topic " + topicName + " cannot be altered");
                 }
-                mergedConfig.getInputSpecs().put(topicName, consumerConfig);
+                finalMergedConfig.getInputSpecs().put(topicName, consumerConfig);
             });
         }
         if (newConfig.getProcessingGuarantees() != null && !newConfig.getProcessingGuarantees().equals(existingConfig.getProcessingGuarantees())) {
-            throw new IllegalArgumentException("Processing Guarantess cannot be altered");
+            throw new IllegalArgumentException("Processing Guarantees cannot be altered");
         }
         if (newConfig.getConfigs() != null) {
             mergedConfig.setConfigs(newConfig.getConfigs());
@@ -558,7 +541,7 @@ public class SinkConfigUtils {
             mergedConfig.setParallelism(newConfig.getParallelism());
         }
         if (newConfig.getRetainOrdering() != null && !newConfig.getRetainOrdering().equals(existingConfig.getRetainOrdering())) {
-            throw new IllegalArgumentException("Retain Orderning cannot be altered");
+            throw new IllegalArgumentException("Retain Ordering cannot be altered");
         }
         if (newConfig.getAutoAck() != null && !newConfig.getAutoAck().equals(existingConfig.getAutoAck())) {
             throw new IllegalArgumentException("AutoAck cannot be altered");
@@ -579,5 +562,25 @@ public class SinkConfigUtils {
             mergedConfig.setCustomRuntimeOptions(newConfig.getCustomRuntimeOptions());
         }
         return mergedConfig;
+    }
+
+    public static void validateSinkConfig(SinkConfig sinkConfig, NarClassLoader narClassLoader) {
+        try {
+            ConnectorDefinition defn = ConnectorUtils.getConnectorDefinition(narClassLoader);
+            if (defn.getSinkConfigClass() != null) {
+                Class configClass = Class.forName(defn.getSinkConfigClass(),  true, narClassLoader);
+                Object configObject =
+                        ObjectMapperFactory.getThreadLocal().convertValue(sinkConfig.getConfigs(), configClass);
+                if (configObject != null) {
+                    ConfigValidation.validateConfig(configObject);
+                }
+            }
+        } catch (IOException e) {
+            throw new IllegalArgumentException("Error validating sink config", e);
+        } catch (ClassNotFoundException e) {
+            throw new IllegalArgumentException("Could not find sink config class", e);
+        } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException("Could not validate sink config: " + e.getMessage());
+        }
     }
 }

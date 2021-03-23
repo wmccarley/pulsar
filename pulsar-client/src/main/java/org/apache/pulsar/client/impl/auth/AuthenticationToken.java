@@ -28,6 +28,9 @@ import java.nio.file.Paths;
 import java.util.Map;
 import java.util.function.Supplier;
 
+import com.google.gson.Gson;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonSyntaxException;
 import org.apache.pulsar.client.api.Authentication;
 import org.apache.pulsar.client.api.AuthenticationDataProvider;
 import org.apache.pulsar.client.api.EncodedAuthenticationParameterSupport;
@@ -38,7 +41,8 @@ import org.apache.pulsar.client.api.PulsarClientException;
  */
 public class AuthenticationToken implements Authentication, EncodedAuthenticationParameterSupport {
 
-    private Supplier<String> tokenSupplier;
+    private static final long serialVersionUID = 1L;
+    private transient Supplier<String> tokenSupplier = null;
 
     public AuthenticationToken() {
     }
@@ -83,7 +87,13 @@ public class AuthenticationToken implements Authentication, EncodedAuthenticatio
                 }
             };
         } else {
-            this.tokenSupplier = () -> encodedAuthParamString;
+            try {
+                // Read token from json string
+                JsonObject authParams = new Gson().fromJson(encodedAuthParamString, JsonObject.class);
+                this.tokenSupplier = () -> authParams.get("token").getAsString();
+            } catch (JsonSyntaxException e) {
+                this.tokenSupplier = () -> encodedAuthParamString;
+            }
         }
     }
 

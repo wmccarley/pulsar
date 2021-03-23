@@ -21,14 +21,11 @@ package org.apache.pulsar.broker.delayed;
 import io.netty.util.Timeout;
 import io.netty.util.Timer;
 import io.netty.util.TimerTask;
-
 import java.time.Clock;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.TimeUnit;
-
 import lombok.extern.slf4j.Slf4j;
-
 import org.apache.bookkeeper.mledger.impl.PositionImpl;
 import org.apache.pulsar.broker.service.persistent.PersistentDispatcherMultipleConsumers;
 import org.apache.pulsar.common.util.collections.TripleLongPriorityQueue;
@@ -49,7 +46,7 @@ public class InMemoryDelayedDeliveryTracker implements DelayedDeliveryTracker, T
     // Timestamp at which the timeout is currently set
     private long currentTimeoutTarget;
 
-    private final long tickTimeMillis;
+    private long tickTimeMillis;
 
     private final Clock clock;
 
@@ -57,7 +54,8 @@ public class InMemoryDelayedDeliveryTracker implements DelayedDeliveryTracker, T
         this(dispatcher, timer, tickTimeMillis, Clock.systemUTC());
     }
 
-    InMemoryDelayedDeliveryTracker(PersistentDispatcherMultipleConsumers dispatcher, Timer timer, long tickTimeMillis, Clock clock) {
+    InMemoryDelayedDeliveryTracker(PersistentDispatcherMultipleConsumers dispatcher, Timer timer,
+                                   long tickTimeMillis, Clock clock) {
         this.dispatcher = dispatcher;
         this.timer = timer;
         this.tickTimeMillis = tickTimeMillis;
@@ -86,7 +84,7 @@ public class InMemoryDelayedDeliveryTracker implements DelayedDeliveryTracker, T
     }
 
     /**
-     * Return true if there's at least a message that is scheduled to be delivered already
+     * Return true if there's at least a message that is scheduled to be delivered already.
      */
     @Override
     public boolean hasMessageAvailable() {
@@ -94,7 +92,7 @@ public class InMemoryDelayedDeliveryTracker implements DelayedDeliveryTracker, T
     }
 
     /**
-     * Get a set of position of messages that have already reached
+     * Get a set of position of messages that have already reached.
      */
     @Override
     public Set<PositionImpl> getScheduledMessages(int maxMessages) {
@@ -125,6 +123,18 @@ public class InMemoryDelayedDeliveryTracker implements DelayedDeliveryTracker, T
         }
         updateTimer();
         return positions;
+    }
+
+    @Override
+    public void resetTickTime(long tickTime) {
+        if (this.tickTimeMillis != tickTime){
+            this.tickTimeMillis = tickTime;
+        }
+    }
+
+    @Override
+    public void clear() {
+        this.priorityQueue.clear();
     }
 
     @Override

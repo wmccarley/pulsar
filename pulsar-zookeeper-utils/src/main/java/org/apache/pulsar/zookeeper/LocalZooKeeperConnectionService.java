@@ -24,7 +24,6 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
 import org.apache.pulsar.zookeeper.ZooKeeperClientFactory.SessionType;
-import org.apache.pulsar.zookeeper.ZooKeeperSessionWatcher.ShutdownService;
 import org.apache.zookeeper.CreateMode;
 import org.apache.zookeeper.KeeperException;
 import org.apache.zookeeper.KeeperException.NoNodeException;
@@ -59,7 +58,7 @@ public class LocalZooKeeperConnectionService implements Closeable {
         this.zkSessionTimeoutMillis = zkSessionTimeoutMillis;
     }
 
-    public void start(ShutdownService shutdownService) throws IOException {
+    public void start(ZookeeperSessionExpiredHandler sessionExpiredHandler) throws IOException {
         // Connect to local ZK
         CompletableFuture<ZooKeeper> zkFuture = zkClientFactory.create(zkConnect, SessionType.ReadWrite,
                 (int) zkSessionTimeoutMillis);
@@ -67,7 +66,7 @@ public class LocalZooKeeperConnectionService implements Closeable {
         try {
             localZooKeeper = zkFuture.get(zkSessionTimeoutMillis, TimeUnit.MILLISECONDS);
             localZooKeeperSessionWatcher = new ZooKeeperSessionWatcher(localZooKeeper, zkSessionTimeoutMillis,
-                    shutdownService);
+                sessionExpiredHandler);
             localZooKeeperSessionWatcher.start();
             localZooKeeper.register(localZooKeeperSessionWatcher);
         } catch (Exception e) {
@@ -108,9 +107,7 @@ public class LocalZooKeeperConnectionService implements Closeable {
 
         // check if the node exists
         if (zkc.exists(path, false) == null) {
-            /**
-             * create znode
-             */
+            //create znode
             try {
                 // do create the node
                 zkc.create(path, new byte[0], Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);

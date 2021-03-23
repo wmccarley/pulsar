@@ -31,12 +31,19 @@ ClientConfiguration& ClientConfiguration::operator=(const ClientConfiguration& x
     return *this;
 }
 
+ClientConfiguration& ClientConfiguration::setMemoryLimit(uint64_t memoryLimitBytes) {
+    impl_->memoryLimit = memoryLimitBytes;
+    return *this;
+}
+
+uint64_t ClientConfiguration::getMemoryLimit() const { return impl_->memoryLimit; }
+
 ClientConfiguration& ClientConfiguration::setAuth(const AuthenticationPtr& authentication) {
     impl_->authenticationPtr = authentication;
     return *this;
 }
 
-const Authentication& ClientConfiguration::getAuth() const { return *impl_->authenticationPtr; }
+Authentication& ClientConfiguration::getAuth() const { return *impl_->authenticationPtr; }
 
 const AuthenticationPtr& ClientConfiguration::getAuthPtr() const { return impl_->authenticationPtr; }
 
@@ -103,12 +110,10 @@ ClientConfiguration& ClientConfiguration::setLogConfFilePath(const std::string& 
 
 const std::string& ClientConfiguration::getLogConfFilePath() const { return impl_->logConfFilePath; }
 
-ClientConfiguration& ClientConfiguration::setLogger(LoggerFactoryPtr loggerFactory) {
-    impl_->loggerFactory = loggerFactory;
+ClientConfiguration& ClientConfiguration::setLogger(LoggerFactory* loggerFactory) {
+    impl_->loggerFactory.reset(loggerFactory);
     return *this;
 }
-
-LoggerFactoryPtr ClientConfiguration::getLogger() const { return impl_->loggerFactory; }
 
 ClientConfiguration& ClientConfiguration::setStatsIntervalInSeconds(
     const unsigned int& statsIntervalInSeconds) {
@@ -119,4 +124,20 @@ ClientConfiguration& ClientConfiguration::setStatsIntervalInSeconds(
 const unsigned int& ClientConfiguration::getStatsIntervalInSeconds() const {
     return impl_->statsIntervalInSeconds;
 }
+
+ClientConfiguration& ClientConfiguration::setPartititionsUpdateInterval(unsigned int intervalInSeconds) {
+    impl_->partitionsUpdateInterval = intervalInSeconds;
+    return *this;
+}
+
+unsigned int ClientConfiguration::getPartitionsUpdateInterval() const {
+    return impl_->partitionsUpdateInterval;
+}
+
+ClientConfiguration& ClientConfiguration::setListenerName(const std::string& listenerName) {
+    impl_->listenerName = listenerName;
+    return *this;
+}
+
+const std::string& ClientConfiguration::getListenerName() const { return impl_->listenerName; }
 }  // namespace pulsar

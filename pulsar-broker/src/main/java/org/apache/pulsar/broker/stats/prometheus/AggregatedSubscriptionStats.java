@@ -18,14 +18,15 @@
  */
 package org.apache.pulsar.broker.stats.prometheus;
 
-import org.apache.pulsar.broker.service.Consumer;
-
 import java.util.HashMap;
 import java.util.Map;
+import org.apache.pulsar.broker.service.Consumer;
 
 public class AggregatedSubscriptionStats {
 
     public long msgBacklog;
+
+    public long msgBacklogNoDelayed;
 
     public boolean blockedSubscriptionOnUnackedMsgs;
 
@@ -38,6 +39,24 @@ public class AggregatedSubscriptionStats {
     public double msgThroughputOut;
 
     public long msgDelayed;
+
+    long msgOutCounter;
+
+    long bytesOutCounter;
+
+    long lastExpireTimestamp;
+
+    long lastConsumedFlowTimestamp;
+
+    long lastConsumedTimestamp;
+
+    long lastAckedTimestamp;
+
+    long lastMarkDeleteAdvancedTimestamp;
+
+    double msgRateExpired;
+
+    long totalMsgExpired;
 
     public Map<Consumer, AggregatedConsumerStats> consumerStat = new HashMap<>();
 }

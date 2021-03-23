@@ -21,12 +21,18 @@ package org.apache.pulsar.client.api;
 import java.nio.ByteBuffer;
 import java.sql.Time;
 import java.sql.Timestamp;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.LocalTime;
 import java.util.Date;
 import org.apache.pulsar.client.api.schema.GenericRecord;
 import org.apache.pulsar.client.api.schema.GenericSchema;
 import org.apache.pulsar.client.api.schema.SchemaDefinition;
 import org.apache.pulsar.client.api.schema.SchemaInfoProvider;
 import org.apache.pulsar.client.internal.DefaultImplementation;
+import org.apache.pulsar.common.classification.InterfaceAudience;
+import org.apache.pulsar.common.classification.InterfaceStability;
 import org.apache.pulsar.common.schema.KeyValue;
 import org.apache.pulsar.common.schema.KeyValueEncodingType;
 import org.apache.pulsar.common.schema.SchemaInfo;
@@ -35,7 +41,9 @@ import org.apache.pulsar.common.schema.SchemaType;
 /**
  * Message schema definition.
  */
-public interface Schema<T> {
+@InterfaceAudience.Public
+@InterfaceStability.Stable
+public interface Schema<T> extends Cloneable{
 
     /**
      * Check if the message is a valid object for this schema.
@@ -137,6 +145,13 @@ public interface Schema<T> {
     }
 
     /**
+     * Duplicates the schema.
+     *
+     * @return The duplicated schema.
+     */
+    Schema<T> clone();
+
+    /**
      * Schema that doesn't perform any encoding on the message payloads. Accepts a byte array and it passes it through.
      */
     Schema<byte[]> BYTES = DefaultImplementation.newBytesSchema();
@@ -201,6 +216,23 @@ public interface Schema<T> {
      */
     Schema<Timestamp> TIMESTAMP = DefaultImplementation.newTimestampSchema();
 
+    /**
+     * Instant Schema.
+     */
+    Schema<Instant> INSTANT = DefaultImplementation.newInstantSchema();
+    /**
+     * LocalDate Schema.
+     */
+    Schema<LocalDate> LOCAL_DATE = DefaultImplementation.newLocalDateSchema();
+    /**
+     * LocalTime Schema.
+     */
+    Schema<LocalTime> LOCAL_TIME = DefaultImplementation.newLocalTimeSchema();
+    /**
+     * LocalDateTime Schema.
+     */
+    Schema<LocalDateTime> LOCAL_DATE_TIME = DefaultImplementation.newLocalDateTimeSchema();
+
     // CHECKSTYLE.OFF: MethodName
 
     /**
@@ -221,6 +253,27 @@ public interface Schema<T> {
      */
     static <T extends com.google.protobuf.GeneratedMessageV3> Schema<T> PROTOBUF(SchemaDefinition<T> schemaDefinition) {
         return DefaultImplementation.newProtobufSchema(schemaDefinition);
+    }
+
+    /**
+     * Create a Protobuf-Native schema type by extracting the fields of the specified class.
+     *
+     * @param clazz the Protobuf generated class to be used to extract the schema
+     * @return a Schema instance
+     */
+    static <T extends com.google.protobuf.GeneratedMessageV3> Schema<T> PROTOBUF_NATIVE(Class<T> clazz) {
+        return DefaultImplementation.newProtobufNativeSchema(SchemaDefinition.builder().withPojo(clazz).build());
+    }
+
+    /**
+     * Create a Protobuf-Native schema type with schema definition.
+     *
+     * @param schemaDefinition schemaDefinition the definition of the schema
+     * @return a Schema instance
+     */
+    static <T extends com.google.protobuf.GeneratedMessageV3> Schema<T> PROTOBUF_NATIVE(
+            SchemaDefinition<T> schemaDefinition) {
+        return DefaultImplementation.newProtobufNativeSchema(schemaDefinition);
     }
 
     /**

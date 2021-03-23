@@ -24,11 +24,13 @@ import com.google.common.collect.Sets;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 
+import java.nio.charset.Charset;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
 import java.util.Random;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.IntStream;
@@ -42,18 +44,34 @@ import org.apache.bookkeeper.mledger.impl.PositionImpl;
 import org.apache.commons.lang3.tuple.Pair;
 import org.apache.commons.lang3.tuple.Triple;
 import org.apache.pulsar.broker.auth.MockedPulsarServiceBaseTest;
+import org.apache.pulsar.client.admin.LongRunningProcessStatus;
+import org.apache.pulsar.client.admin.PulsarAdminException;
+import org.apache.pulsar.client.api.MessageId;
+import org.apache.pulsar.client.api.Producer;
+import org.apache.pulsar.client.api.ProducerBuilder;
 import org.apache.pulsar.client.api.RawMessage;
 import org.apache.pulsar.client.impl.RawMessageImpl;
-import org.apache.pulsar.common.api.proto.PulsarApi.MessageIdData;
+import org.apache.pulsar.common.api.proto.MessageIdData;
 import org.apache.pulsar.common.policies.data.ClusterData;
 import org.apache.pulsar.common.policies.data.TenantInfo;
+import org.apache.pulsar.common.util.FutureUtil;
 import org.testng.Assert;
 import org.testng.annotations.AfterMethod;
 import org.testng.annotations.BeforeMethod;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
+@Test(groups = "broker-compaction")
 public class CompactedTopicTest extends MockedPulsarServiceBaseTest {
     private final Random r = new Random(0);
+
+    @DataProvider(name = "batchEnabledProvider")
+    public Object[][] batchEnabledProvider() {
+        return new Object[][] {
+                { Boolean.FALSE },
+                { Boolean.TRUE }
+        };
+    }
 
     @BeforeMethod
     @Override
@@ -61,13 +79,13 @@ public class CompactedTopicTest extends MockedPulsarServiceBaseTest {
         super.internalSetup();
 
         admin.clusters().createCluster("use",
-                new ClusterData("http://127.0.0.1:" + BROKER_WEBSERVICE_PORT));
+                new ClusterData(pulsar.getWebServiceAddress()));
         admin.tenants().createTenant("my-property",
                 new TenantInfo(Sets.newHashSet("appid1", "appid2"), Sets.newHashSet("use")));
         admin.namespaces().createNamespace("my-property/use/my-ns");
     }
 
-    @AfterMethod
+    @AfterMethod(alwaysRun = true)
     @Override
     public void cleanup() throws Exception {
         super.internalCleanup();
@@ -90,26 +108,24 @@ public class CompactedTopicTest extends MockedPulsarServiceBaseTest {
         AtomicLong entryIds = new AtomicLong(0L);
         CompletableFuture.allOf(
                 IntStream.range(0, count).mapToObj((i) -> {
-                        List<MessageIdData> idsInGap = new ArrayList<MessageIdData>();
+                        List<MessageIdData> idsInGap = new ArrayList<>();
                         if (r.nextInt(10) == 1) {
                             long delta = r.nextInt(10) + 1;
-                            idsInGap.add(MessageIdData.newBuilder()
+                            idsInGap.add(new MessageIdData()
                                          .setLedgerId(ledgerIds.get())
-                                         .setEntryId(entryIds.get() + 1)
-                                         .build());
+                                         .setEntryId(entryIds.get() + 1));
                             ledgerIds.addAndGet(delta);
                             entryIds.set(0);
                         }
                         long delta = r.nextInt(5);
                         if (delta != 0) {
-                            idsInGap.add(MessageIdData.newBuilder()
+                            idsInGap.add(new MessageIdData()
                                          .setLedgerId(ledgerIds.get())
-                                         .setEntryId(entryIds.get() + 1)
-                                         .build());
+                                         .setEntryId(entryIds.get() + 1));
                         }
-                        MessageIdData id = MessageIdData.newBuilder()
+                        MessageIdData id = new MessageIdData()
                             .setLedgerId(ledgerIds.get())
-                            .setEntryId(entryIds.addAndGet(delta + 1)).build();
+                            .setEntryId(entryIds.addAndGet(delta + 1));
 
                         @Cleanup
                         RawMessage m = new RawMessageImpl(id, Unpooled.EMPTY_BUFFER);
@@ -179,14 +195,13 @@ public class CompactedTopicTest extends MockedPulsarServiceBaseTest {
         for (Pair<MessageIdData, Long> p : positions) {
             PositionImpl pos = new PositionImpl(p.getLeft().getLedgerId(), p.getLeft().getEntryId());
             Long got = CompactedTopicImpl.findStartPoint(pos, lastEntryId, cache).get();
-            Assert.assertEquals(got, Long.valueOf(p.getRight()));
+            Assert.assertEquals(got, p.getRight());
         }
 
         // Check ids we know are in the gaps of the compacted ledger
         for (Pair<MessageIdData, Long> gap : idsInGaps) {
             PositionImpl pos = new PositionImpl(gap.getLeft().getLedgerId(), gap.getLeft().getEntryId());
-            Assert.assertEquals(CompactedTopicImpl.findStartPoint(pos, lastEntryId, cache).get(),
-                                Long.valueOf(gap.getRight()));
+            Assert.assertEquals(CompactedTopicImpl.findStartPoint(pos, lastEntryId, cache).get(), gap.getRight());
         }
     }
 
@@ -232,5 +247,61 @@ public class CompactedTopicTest extends MockedPulsarServiceBaseTest {
         bk.openLedger(newCompactedLedger.getId(),
                       Compactor.COMPACTED_TOPIC_LEDGER_DIGEST_TYPE,
                       Compactor.COMPACTED_TOPIC_LEDGER_PASSWORD).close();
+    }
+
+    @Test(dataProvider = "batchEnabledProvider")
+    public void testCompactWithEmptyMessage(boolean batchEnabled) throws Exception {
+        final String key = "1";
+        byte[] msgBytes = "".getBytes();
+        final String topic = "persistent://my-property/use/my-ns/testCompactWithEmptyMessage-" + UUID.randomUUID();
+        admin.topics().createPartitionedTopic(topic, 1);
+        final int messages = 10;
+
+        ProducerBuilder<byte[]> builder = pulsarClient.newProducer().topic(topic);
+        if (!batchEnabled) {
+            builder.enableBatching(false);
+        } else {
+            builder.batchingMaxMessages(messages / 2);
+        }
+        Producer<byte[]> producer = builder.create();
+
+        List<CompletableFuture<MessageId>> list = new ArrayList<>(messages);
+        for (int i = 0; i < messages; i++) {
+            list.add(producer.newMessage().keyBytes(key.getBytes(Charset.defaultCharset())).value(msgBytes).sendAsync());
+        }
+
+        FutureUtil.waitForAll(list).get();
+        admin.topics().triggerCompaction(topic);
+
+        boolean succeed = retryStrategically((test) -> {
+            try {
+                return LongRunningProcessStatus.Status.SUCCESS.equals(admin.topics().compactionStatus(topic).status);
+            } catch (PulsarAdminException e) {
+                return false;
+            }
+        }, 10, 200);
+
+        Assert.assertTrue(succeed);
+
+        // Send more messages and trigger compaction again.
+
+        list.clear();
+        for (int i = 0; i < messages; i++) {
+            list.add(producer.newMessage().key(key).value(msgBytes).sendAsync());
+        }
+
+        FutureUtil.waitForAll(list).get();
+        admin.topics().triggerCompaction(topic);
+
+        succeed = retryStrategically((test) -> {
+            try {
+                return LongRunningProcessStatus.Status.SUCCESS.equals(admin.topics().compactionStatus(topic).status);
+            } catch (PulsarAdminException e) {
+                return false;
+            }
+        }, 10, 200);
+        Assert.assertTrue(succeed);
+
+        producer.close();
     }
 }

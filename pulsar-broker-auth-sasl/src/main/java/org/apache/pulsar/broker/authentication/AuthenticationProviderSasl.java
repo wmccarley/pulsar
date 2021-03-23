@@ -50,9 +50,9 @@ import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
 import com.google.common.collect.Maps;
-import lombok.SneakyThrows;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.pulsar.broker.ServiceConfiguration;
+import org.apache.pulsar.broker.authentication.metrics.AuthenticationMetrics;
 import org.apache.pulsar.common.api.AuthData;
 import org.apache.pulsar.common.sasl.JAASCredentialsContainer;
 import org.apache.pulsar.common.sasl.SaslConstants;
@@ -90,7 +90,7 @@ public class AuthenticationProviderSasl implements AuthenticationProvider {
                     new PulsarSaslServer.SaslServerCallbackHandler(allowedIdsPattern),
                     configuration);
             } catch (LoginException e) {
-                log.error("JAAS login in broker failed: {}" , e);
+                log.error("JAAS login in broker failed" , e);
                 throw new IOException(e);
             }
         }
@@ -100,11 +100,18 @@ public class AuthenticationProviderSasl implements AuthenticationProvider {
 
     @Override
     public String authenticate(AuthenticationDataSource authData) throws AuthenticationException {
-        if (authData instanceof SaslAuthenticationDataSource) {
-            return ((SaslAuthenticationDataSource)authData).getAuthorizationID();
-        } else {
-            throw new AuthenticationException("Not support authDataSource type, expect sasl.");
+        try {
+            if (authData instanceof SaslAuthenticationDataSource) {
+                AuthenticationMetrics.authenticateSuccess(getClass().getSimpleName(), getAuthMethodName());
+                return ((SaslAuthenticationDataSource) authData).getAuthorizationID();
+            } else {
+                throw new AuthenticationException("Not support authDataSource type, expect sasl.");
+            }
+        } catch (AuthenticationException exception) {
+            AuthenticationMetrics.authenticateFailure(getClass().getSimpleName(), getAuthMethodName(), exception.getMessage());
+            throw exception;
         }
+
     }
 
     @Override
@@ -125,7 +132,7 @@ public class AuthenticationProviderSasl implements AuthenticationProvider {
                 new SaslAuthenticationDataSource(
                     new PulsarSaslServer(jaasCredentialsContainer.getSubject(), allowedIdsPattern)));
         } catch (Throwable t) {
-            log.error("Failed create sasl auth state: {}" , t);
+            log.error("Failed create sasl auth state" , t);
             throw new AuthenticationException(t.getMessage());
         }
     }

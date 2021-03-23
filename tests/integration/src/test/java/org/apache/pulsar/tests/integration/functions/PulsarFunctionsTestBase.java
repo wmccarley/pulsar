@@ -59,7 +59,7 @@ public abstract class PulsarFunctionsTestBase extends PulsarTestSuite {
         log.info("{} function workers has started", numFunctionWorkers);
     }
 
-    @AfterClass
+    @AfterClass(alwaysRun = true)
     public void teardownFunctionWorkers() {
         log.info("Tearing down function workers ...");
         pulsarCluster.stopWorkers();
@@ -103,6 +103,12 @@ public abstract class PulsarFunctionsTestBase extends PulsarTestSuite {
     public static final String PUBLISH_FUNCTION_PYTHON_FILE = "typed_message_builder_publish.py";
     public static final String EXCEPTION_FUNCTION_PYTHON_FILE = "exception_function.py";
 
+    public static final String EXCLAMATION_GO_FILE = "exclamationFunc";
+    public static final String PUBLISH_FUNCTION_GO_FILE = "exclamationFunc";
+
+    public static final String LOGGING_JAVA_CLASS =
+            "org.apache.pulsar.functions.api.examples.LoggingFunction";
+
     protected static String getExclamationClass(Runtime runtime,
                                                 boolean pyZip,
                                                 boolean extraDeps) {
@@ -125,7 +131,8 @@ public abstract class PulsarFunctionsTestBase extends PulsarTestSuite {
     public static Object[][] functionRuntimes() {
         return new Object[][] {
             new Object[] { Runtime.JAVA },
-            new Object[] { Runtime.PYTHON }
+            new Object[] { Runtime.PYTHON },
+            new Object[] { Runtime.GO }
         };
     }
 

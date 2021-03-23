@@ -18,35 +18,41 @@
  */
 #ifndef LIB_UNACKEDMESSAGETRACKERENABLED_H_
 #define LIB_UNACKEDMESSAGETRACKERENABLED_H_
+#include "lib/TestUtil.h"
 #include "lib/UnAckedMessageTrackerInterface.h"
 
 #include <mutex>
 
 namespace pulsar {
-
 class UnAckedMessageTrackerEnabled : public UnAckedMessageTrackerInterface {
    public:
     ~UnAckedMessageTrackerEnabled();
     UnAckedMessageTrackerEnabled(long timeoutMs, const ClientImplPtr, ConsumerImplBase&);
-    bool add(const MessageId& m);
-    bool remove(const MessageId& m);
+    UnAckedMessageTrackerEnabled(long timeoutMs, long tickDuration, const ClientImplPtr, ConsumerImplBase&);
+    bool add(const MessageId& msgId);
+    bool remove(const MessageId& msgId);
     void removeMessagesTill(const MessageId& msgId);
     void removeTopicMessage(const std::string& topic);
     void timeoutHandler();
 
     void clear();
 
-   private:
+   protected:
     void timeoutHandlerHelper();
     bool isEmpty();
     long size();
-    std::set<MessageId> currentSet_;
-    std::set<MessageId> oldSet_;
+    std::map<MessageId, std::set<MessageId>&> messageIdPartitionMap;
+    std::deque<std::set<MessageId>> timePartitions;
     std::mutex lock_;
     DeadlineTimerPtr timer_;
     ConsumerImplBase& consumerReference_;
     ClientImplPtr client_;
     long timeoutMs_;
+    long tickDurationInMs_;
+
+    FRIEND_TEST(ConsumerTest, testPartitionedConsumerUnAckedMessageRedelivery);
+    FRIEND_TEST(ConsumerTest, testMultiTopicsConsumerUnAckedMessageRedelivery);
+    FRIEND_TEST(ConsumerTest, testBatchUnAckedMessageTracker);
 };
 }  // namespace pulsar
 

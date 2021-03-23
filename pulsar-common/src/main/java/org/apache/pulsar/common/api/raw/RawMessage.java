@@ -19,7 +19,6 @@
 package org.apache.pulsar.common.api.raw;
 
 import io.netty.buffer.ByteBuf;
-
 import java.util.Map;
 import java.util.Optional;
 
@@ -101,4 +100,25 @@ public interface RawMessage {
      * @return the key of the message
      */
     Optional<String> getKey();
+
+    /**
+     * Get the schema verison of the message.
+     *
+     * @return the schema version of the message
+     */
+    byte[] getSchemaVersion();
+
+    /**
+     * Get byteBuf of the key.
+     *
+     * @return the byte array with the key payload
+     */
+    Optional<ByteBuf> getKeyBytes();
+
+    /**
+     * Check whether the key has been base64 encoded.
+     *
+     * @return true if the key is base64 encoded, false otherwise
+     */
+    boolean hasBase64EncodedKey();
 }

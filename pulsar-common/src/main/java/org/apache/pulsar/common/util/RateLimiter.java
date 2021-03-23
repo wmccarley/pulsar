@@ -19,7 +19,6 @@
 package org.apache.pulsar.common.util;
 
 import static com.google.common.base.Preconditions.checkArgument;
-
 import com.google.common.base.MoreObjects;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
@@ -60,9 +59,16 @@ public class RateLimiter implements AutoCloseable{
     private boolean isClosed;
     // permitUpdate helps to update permit-rate at runtime
     private Supplier<Long> permitUpdater;
+    private RateLimitFunction rateLimitFunction;
 
     public RateLimiter(final long permits, final long rateTime, final TimeUnit timeUnit) {
         this(null, permits, rateTime, timeUnit, null);
+    }
+
+    public RateLimiter(final long permits, final long rateTime, final TimeUnit timeUnit,
+                       RateLimitFunction autoReadResetFunction) {
+        this(null, permits, rateTime, timeUnit, null);
+        this.rateLimitFunction = autoReadResetFunction;
     }
 
     public RateLimiter(final ScheduledExecutorService service, final long permits, final long rateTime,
@@ -243,6 +249,9 @@ public class RateLimiter implements AutoCloseable{
             if (newPermitRate > 0) {
                 setRate(newPermitRate);
             }
+        }
+        if (rateLimitFunction != null) {
+            rateLimitFunction.apply();
         }
         notifyAll();
     }

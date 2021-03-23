@@ -22,8 +22,6 @@ import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.Future;
-
 import javax.ws.rs.ClientErrorException;
 import javax.ws.rs.ServerErrorException;
 import javax.ws.rs.ServiceUnavailableException;
@@ -34,7 +32,6 @@ import javax.ws.rs.client.InvocationCallback;
 import javax.ws.rs.client.WebTarget;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
-
 import org.apache.pulsar.client.admin.PulsarAdminException;
 import org.apache.pulsar.client.admin.PulsarAdminException.ConflictException;
 import org.apache.pulsar.client.admin.PulsarAdminException.ConnectException;
@@ -48,10 +45,12 @@ import org.apache.pulsar.client.api.Authentication;
 import org.apache.pulsar.client.api.AuthenticationDataProvider;
 import org.apache.pulsar.client.api.PulsarClientException;
 import org.apache.pulsar.common.policies.data.ErrorData;
-import org.apache.pulsar.common.util.FutureUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+/**
+ * Abstract base class for all admin resources.
+ */
 public abstract class BaseResource {
     private static final Logger log = LoggerFactory.getLogger(BaseResource.class);
 
@@ -87,7 +86,7 @@ public abstract class BaseResource {
             // auth complete, return a new Builder
             authFuture.whenComplete((respHeaders, ex) -> {
                 if (ex != null) {
-                    log.warn("[{}] Failed to perform http request at authn stage: {}",
+                    log.warn("[{}] Failed to perform http request at auth stage: {}", target.getUri(),
                         ex.getMessage());
                     builderFuture.completeExceptionally(new PulsarClientException(ex));
                     return;
@@ -160,11 +159,11 @@ public abstract class BaseResource {
         return future;
     }
 
-    public <T> Future<T> asyncGetRequest(final WebTarget target, InvocationCallback<T> callback) {
+    public <T> void asyncGetRequest(final WebTarget target, InvocationCallback<T> callback) {
         try {
-            return request(target).async().get(callback);
+            request(target).async().get(callback);
         } catch (PulsarAdminException cae) {
-            return FutureUtil.failedFuture(cae);
+            callback.failed(cae);
         }
     }
 
@@ -191,7 +190,9 @@ public abstract class BaseResource {
     }
 
     public PulsarAdminException getApiException(Throwable e) {
-        if (e instanceof ServiceUnavailableException) {
+        if (e instanceof PulsarAdminException) {
+            return (PulsarAdminException) e;
+        } else if (e instanceof ServiceUnavailableException) {
             if (e.getCause() instanceof java.net.ConnectException) {
                 return new ConnectException(e.getCause());
             } else {
@@ -229,16 +230,20 @@ public abstract class BaseResource {
         }
     }
 
-    public WebApplicationException getApiException(Response response) {
+    public PulsarAdminException getApiException(Response response) {
         if (response.getStatusInfo().equals(Response.Status.OK)) {
             return null;
         }
-        if (response.getStatus() >= 500) {
-            throw new ServerErrorException(response);
-        } else if (response.getStatus() >= 400) {
-            throw new ClientErrorException(response);
-        } else {
-            throw new WebApplicationException(response);
+        try {
+            if (response.getStatus() >= 500) {
+                throw new ServerErrorException(response);
+            } else if (response.getStatus() >= 400) {
+                throw new ClientErrorException(response);
+            } else {
+                throw new WebApplicationException(response);
+            }
+        } catch (Exception e) {
+            return getApiException(e);
         }
     }
 }

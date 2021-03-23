@@ -18,19 +18,20 @@
  */
 package org.apache.pulsar.broker.service;
 
+import io.netty.buffer.ByteBuf;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
-
 import org.apache.bookkeeper.mledger.Position;
 import org.apache.pulsar.broker.service.persistent.DispatchRateLimiter;
 import org.apache.pulsar.broker.stats.ClusterReplicationMetrics;
 import org.apache.pulsar.broker.stats.NamespaceStats;
 import org.apache.pulsar.client.api.MessageId;
-import org.apache.pulsar.common.api.proto.PulsarApi;
-import org.apache.pulsar.common.api.proto.PulsarApi.CommandSubscribe.InitialPosition;
-import org.apache.pulsar.common.api.proto.PulsarApi.CommandSubscribe.SubType;
+import org.apache.pulsar.client.api.transaction.TxnID;
+import org.apache.pulsar.common.api.proto.CommandSubscribe.InitialPosition;
+import org.apache.pulsar.common.api.proto.CommandSubscribe.SubType;
+import org.apache.pulsar.common.api.proto.KeySharedMeta;
 import org.apache.pulsar.common.policies.data.BacklogQuota;
 import org.apache.pulsar.common.policies.data.PersistentTopicInternalStats;
 import org.apache.pulsar.common.policies.data.Policies;
@@ -40,8 +41,6 @@ import org.apache.pulsar.common.protocol.schema.SchemaVersion;
 import org.apache.pulsar.common.util.collections.ConcurrentOpenHashMap;
 import org.apache.pulsar.policies.data.loadbalancer.NamespaceBundleStats;
 import org.apache.pulsar.utils.StatsOutputStream;
-
-import io.netty.buffer.ByteBuf;
 
 public interface Topic {
 
@@ -77,6 +76,9 @@ public interface Topic {
 
         void completed(Exception e, long ledgerId, long entryId);
 
+        default void setMetadataFromEntryData(ByteBuf entryData) {
+        }
+
         default long getHighestSequenceId() {
             return  -1L;
         }
@@ -88,23 +90,38 @@ public interface Topic {
         default long getOriginalHighestSequenceId() {
             return  -1L;
         }
+
+        default long getNumberOfMessages() {
+            return  1L;
+        }
     }
 
     void publishMessage(ByteBuf headersAndPayload, PublishContext callback);
 
-    void addProducer(Producer producer) throws BrokerServiceException;
+    /**
+     * Tries to add a producer to the topic. Several validations will be performed.
+     *
+     * @param producer
+     * @param producerQueuedFuture
+     *            a future that will be triggered if the producer is being queued up prior of getting established
+     * @return the "topic epoch" if there is one or empty
+     */
+    CompletableFuture<Optional<Long>> addProducer(Producer producer, CompletableFuture<Void> producerQueuedFuture);
 
     void removeProducer(Producer producer);
 
     /**
-     * record add-latency
+     * record add-latency.
      */
     void recordAddLatency(long latency, TimeUnit unit);
 
-    CompletableFuture<Consumer> subscribe(ServerCnx cnx, String subscriptionName, long consumerId, SubType subType,
-            int priorityLevel, String consumerName, boolean isDurable, MessageId startMessageId,
-            Map<String, String> metadata, boolean readCompacted, InitialPosition initialPosition,
-            long startMessageRollbackDurationSec, boolean replicateSubscriptionState, PulsarApi.KeySharedMeta keySharedMeta);
+    CompletableFuture<Consumer> subscribe(TransportCnx cnx, String subscriptionName, long consumerId, SubType subType,
+                                          int priorityLevel, String consumerName, boolean isDurable,
+                                          MessageId startMessageId,
+                                          Map<String, String> metadata, boolean readCompacted,
+                                          InitialPosition initialPosition,
+                                          long startMessageRollbackDurationSec, boolean replicateSubscriptionState,
+                                          KeySharedMeta keySharedMeta);
 
     CompletableFuture<Subscription> createSubscription(String subscriptionName, InitialPosition initialPosition,
             boolean replicateSubscriptionState);
@@ -121,11 +138,19 @@ public interface Topic {
 
     CompletableFuture<Void> checkReplication();
 
-    CompletableFuture<Void> close();
+    CompletableFuture<Void> close(boolean closeWithoutWaitingClientDisconnect);
 
-    void checkGC(int gcInterval);
+    void checkGC();
 
     void checkInactiveSubscriptions();
+
+    /**
+     * Activate cursors those caught up backlog-threshold entries and deactivate slow cursors which are creating
+     * backlog.
+     */
+    void checkBackloggedCursors();
+
+    void checkDeduplicationSnapshot();
 
     void checkMessageExpiry();
 
@@ -140,6 +165,14 @@ public interface Topic {
     void resetBrokerPublishCountAndEnableReadIfRequired(boolean doneReset);
 
     boolean isPublishRateExceeded();
+
+    boolean isTopicPublishRateExceeded(int msgSize, int numMessages);
+
+    boolean isBrokerPublishRateExceeded();
+
+    void disableCnxAutoRead();
+
+    void enableCnxAutoRead();
 
     CompletableFuture<Void> onPoliciesUpdate(Policies data);
 
@@ -161,11 +194,13 @@ public interface Topic {
 
     ConcurrentOpenHashMap<String, ? extends Replicator> getReplicators();
 
-    TopicStats getStats();
+    TopicStats getStats(boolean getPreciseBacklog, boolean subscriptionBacklogSize);
 
-    PersistentTopicInternalStats getInternalStats();
+    CompletableFuture<PersistentTopicInternalStats> getInternalStats(boolean includeLedgerMetadata);
 
-    Position getLastMessageId();
+    Position getLastPosition();
+
+    CompletableFuture<MessageId> getLastMessageId();
 
     /**
      * Whether a topic has had a schema defined for it.
@@ -200,4 +235,30 @@ public interface Topic {
     default Optional<DispatchRateLimiter> getDispatchRateLimiter() {
         return Optional.empty();
     }
+
+    default boolean isSystemTopic() {
+        return false;
+    }
+
+    /* ------ Transaction related ------ */
+
+    /**
+     * Publish Transaction message to this Topic's TransactionBuffer.
+     *
+     * @param txnID             Transaction Id
+     * @param headersAndPayload Message data
+     * @param publishContext    Publish context
+     */
+    void publishTxnMessage(TxnID txnID, ByteBuf headersAndPayload, PublishContext publishContext);
+
+    /**
+     * End the transaction in this topic.
+     *
+     * @param txnID Transaction id
+     * @param txnAction Transaction action.
+     * @param lowWaterMark low water mark of this tc
+     * @return
+     */
+    CompletableFuture<Void> endTxn(TxnID txnID, int txnAction, long lowWaterMark);
+
 }

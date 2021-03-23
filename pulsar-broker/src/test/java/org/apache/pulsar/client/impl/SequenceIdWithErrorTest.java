@@ -34,6 +34,7 @@ import org.apache.pulsar.client.api.Schema;
 import org.apache.pulsar.common.naming.TopicName;
 import org.testng.annotations.Test;
 
+@Test(groups = "broker-impl")
 public class SequenceIdWithErrorTest extends BrokerBkEnsemblesTests {
 
     /**
@@ -46,7 +47,7 @@ public class SequenceIdWithErrorTest extends BrokerBkEnsemblesTests {
         String topicName = "prop/my-test/my-topic";
         int N = 10;
 
-        PulsarClient client = PulsarClient.builder().serviceUrl("pulsar://localhost:" + BROKER_SERVICE_PORT).build();
+        PulsarClient client = PulsarClient.builder().serviceUrl(pulsar.getBrokerServiceUrl()).build();
 
         // Create consumer
         Consumer<String> consumer = client.newConsumer(Schema.STRING).topic(topicName).subscriptionName("sub")
@@ -54,8 +55,8 @@ public class SequenceIdWithErrorTest extends BrokerBkEnsemblesTests {
 
         // Fence the topic by opening the ManagedLedger for the topic outside the Pulsar broker. This will cause the
         // broker to fail subsequent send operation and it will trigger a recover
-        ManagedLedgerClientFactory clientFactory = new ManagedLedgerClientFactory(pulsar.getConfiguration(),
-                pulsar.getZkClient(), pulsar.getBookKeeperClientFactory());
+        ManagedLedgerClientFactory clientFactory = new ManagedLedgerClientFactory();
+        clientFactory.initialize(pulsar.getConfiguration(), pulsar.getZkClient(), pulsar.getBookKeeperClientFactory());
         ManagedLedgerFactory mlFactory = clientFactory.getManagedLedgerFactory();
         ManagedLedger ml = mlFactory.open(TopicName.get(topicName).getPersistenceNamingEncoding());
         ml.close();
@@ -79,12 +80,12 @@ public class SequenceIdWithErrorTest extends BrokerBkEnsemblesTests {
     }
 
     @Test(enabled = false)
-    public void testCrashBrokerWithoutCursorLedgerLeak() throws Exception {
+    public void testCrashBrokerWithoutCursorLedgerLeak() {
         // Ignore test
     }
 
     @Test(enabled = false)
-    public void testSkipCorruptDataLedger() throws Exception {
+    public void testSkipCorruptDataLedger() {
         // Ignore test
     }
 }

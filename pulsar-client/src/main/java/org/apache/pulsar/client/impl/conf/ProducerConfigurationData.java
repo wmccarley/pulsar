@@ -32,8 +32,10 @@ import org.apache.pulsar.client.api.BatcherBuilder;
 import org.apache.pulsar.client.api.CompressionType;
 import org.apache.pulsar.client.api.CryptoKeyReader;
 import org.apache.pulsar.client.api.HashingScheme;
+import org.apache.pulsar.client.api.MessageCrypto;
 import org.apache.pulsar.client.api.MessageRouter;
 import org.apache.pulsar.client.api.MessageRoutingMode;
+import org.apache.pulsar.client.api.ProducerAccessMode;
 import org.apache.pulsar.client.api.ProducerCryptoFailureAction;
 
 import com.fasterxml.jackson.annotation.JsonIgnore;
@@ -76,9 +78,13 @@ public class ProducerConfigurationData implements Serializable, Cloneable {
     private boolean batchingEnabled = true; // enabled by default
     @JsonIgnore
     private BatcherBuilder batcherBuilder = BatcherBuilder.DEFAULT;
+    private boolean chunkingEnabled = false;
 
     @JsonIgnore
     private CryptoKeyReader cryptoKeyReader;
+
+    @JsonIgnore
+    private transient MessageCrypto messageCrypto = null;
 
     @JsonIgnore
     private Set<String> encryptionKeys = new TreeSet<>();
@@ -90,7 +96,11 @@ public class ProducerConfigurationData implements Serializable, Cloneable {
 
     private boolean autoUpdatePartitions = true;
 
+    private long autoUpdatePartitionsIntervalSeconds = 60;
+
     private boolean multiSchema = true;
+
+    private ProducerAccessMode accessMode = ProducerAccessMode.Shared;
 
     private SortedMap<String, String> properties = new TreeMap<>();
 
@@ -158,4 +168,8 @@ public class ProducerConfigurationData implements Serializable, Cloneable {
         return this.batchingPartitionSwitchFrequencyByPublishDelay * batchingMaxPublishDelayMicros;
     }
 
+    public void setAutoUpdatePartitionsIntervalSeconds(int interval, TimeUnit timeUnit) {
+        checkArgument(interval > 0, "interval needs to be > 0");
+        this.autoUpdatePartitionsIntervalSeconds = timeUnit.toSeconds(interval);
+    }
 }

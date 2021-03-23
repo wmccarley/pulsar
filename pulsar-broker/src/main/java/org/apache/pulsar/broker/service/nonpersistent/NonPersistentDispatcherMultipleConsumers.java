@@ -22,9 +22,7 @@ import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
-
 import org.apache.bookkeeper.mledger.Entry;
-import org.apache.bookkeeper.mledger.util.Rate;
 import org.apache.pulsar.broker.ServiceConfiguration;
 import org.apache.pulsar.broker.service.AbstractDispatcherMultipleConsumers;
 import org.apache.pulsar.broker.service.BrokerServiceException;
@@ -35,8 +33,9 @@ import org.apache.pulsar.broker.service.RedeliveryTracker;
 import org.apache.pulsar.broker.service.RedeliveryTrackerDisabled;
 import org.apache.pulsar.broker.service.SendMessageInfo;
 import org.apache.pulsar.broker.service.Subscription;
-import org.apache.pulsar.common.api.proto.PulsarApi.CommandSubscribe.SubType;
+import org.apache.pulsar.common.api.proto.CommandSubscribe.SubType;
 import org.apache.pulsar.common.protocol.Commands;
+import org.apache.pulsar.common.stats.Rate;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -51,7 +50,8 @@ public class NonPersistentDispatcherMultipleConsumers extends AbstractDispatcher
     private CompletableFuture<Void> closeFuture = null;
     private final String name;
     protected final Rate msgDrop;
-    protected static final AtomicIntegerFieldUpdater<NonPersistentDispatcherMultipleConsumers> TOTAL_AVAILABLE_PERMITS_UPDATER = AtomicIntegerFieldUpdater
+    protected static final AtomicIntegerFieldUpdater<NonPersistentDispatcherMultipleConsumers>
+            TOTAL_AVAILABLE_PERMITS_UPDATER = AtomicIntegerFieldUpdater
             .newUpdater(NonPersistentDispatcherMultipleConsumers.class, "totalAvailablePermits");
     @SuppressWarnings("unused")
     private volatile int totalAvailablePermits = 0;
@@ -72,14 +72,9 @@ public class NonPersistentDispatcherMultipleConsumers extends AbstractDispatcher
     @Override
     public synchronized void addConsumer(Consumer consumer) throws BrokerServiceException {
         if (IS_CLOSED_UPDATER.get(this) == TRUE) {
-            log.warn("[{}] Dispatcher is already closed. Closing consumer ", name, consumer);
+            log.warn("[{}] Dispatcher is already closed. Closing consumer {}", name, consumer);
             consumer.disconnect();
             return;
-        }
-
-        if (isConsumersExceededOnTopic()) {
-            log.warn("[{}] Attempting to add consumer to topic which reached max consumers limit", name);
-            throw new ConsumerBusyException("Topic reached max consumers limit");
         }
 
         if (isConsumersExceededOnSubscription()) {
@@ -89,14 +84,6 @@ public class NonPersistentDispatcherMultipleConsumers extends AbstractDispatcher
 
         consumerList.add(consumer);
         consumerSet.add(consumer);
-    }
-
-    private boolean isConsumersExceededOnTopic() {
-        final int maxConsumersPerTopic = serviceConfig.getMaxConsumersPerTopic();
-        if (maxConsumersPerTopic > 0 && maxConsumersPerTopic <= topic.getNumberOfConsumers()) {
-            return true;
-        }
-        return false;
     }
 
     private boolean isConsumersExceededOnSubscription() {
@@ -175,6 +162,11 @@ public class NonPersistentDispatcherMultipleConsumers extends AbstractDispatcher
     }
 
     @Override
+    public CompletableFuture<Void> disconnectActiveConsumers(boolean isResetCursor) {
+        return disconnectAllConsumers(isResetCursor);
+    }
+
+    @Override
     public synchronized void resetCloseFuture() {
         closeFuture = null;
     }
@@ -201,9 +193,9 @@ public class NonPersistentDispatcherMultipleConsumers extends AbstractDispatcher
         if (consumer != null) {
             SendMessageInfo sendMessageInfo = SendMessageInfo.getThreadLocal();
             EntryBatchSizes batchSizes = EntryBatchSizes.get(entries.size());
-            filterEntriesForConsumer(entries, batchSizes, sendMessageInfo);
-            consumer.sendMessages(entries, batchSizes, sendMessageInfo.getTotalMessages(),
-                    sendMessageInfo.getTotalBytes(), getRedeliveryTracker());
+            filterEntriesForConsumer(entries, batchSizes, sendMessageInfo, null, null, false);
+            consumer.sendMessages(entries, batchSizes, null, sendMessageInfo.getTotalMessages(),
+                    sendMessageInfo.getTotalBytes(), sendMessageInfo.getTotalChunkedMessages(), getRedeliveryTracker());
 
             TOTAL_AVAILABLE_PERMITS_UPDATER.addAndGet(this, -sendMessageInfo.getTotalMessages());
         } else {

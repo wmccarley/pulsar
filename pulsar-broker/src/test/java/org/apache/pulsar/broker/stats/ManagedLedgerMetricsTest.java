@@ -34,8 +34,7 @@ import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
 
-/**
- */
+@Test(groups = "broker")
 public class ManagedLedgerMetricsTest extends BrokerTestBase {
 
     @BeforeClass
@@ -44,7 +43,7 @@ public class ManagedLedgerMetricsTest extends BrokerTestBase {
         super.baseSetup();
     }
 
-    @AfterClass
+    @AfterClass(alwaysRun = true)
     @Override
     protected void cleanup() throws Exception {
         super.internalCleanup();

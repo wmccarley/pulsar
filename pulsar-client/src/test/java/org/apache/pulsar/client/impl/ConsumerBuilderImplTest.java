@@ -121,6 +121,29 @@ public class ConsumerBuilderImplTest {
                 .cryptoKeyReader(null);
     }
 
+    @Test(expectedExceptions = IllegalArgumentException.class)
+    public void testConsumerBuilderImplWhenDefaultCryptoKeyReaderIsNullString() {
+        consumerBuilderImpl.topic(TOPIC_NAME).subscriptionName("subscriptionName")
+                .defaultCryptoKeyReader((String) null);
+    }
+
+    @Test(expectedExceptions = IllegalArgumentException.class)
+    public void testConsumerBuilderImplWhenDefaultCryptoKeyReaderIsEmptyString() {
+        consumerBuilderImpl.topic(TOPIC_NAME).subscriptionName("subscriptionName").defaultCryptoKeyReader("");
+    }
+
+    @Test(expectedExceptions = NullPointerException.class)
+    public void testConsumerBuilderImplWhenDefaultCryptoKeyReaderIsNullMap() {
+        consumerBuilderImpl.topic(TOPIC_NAME).subscriptionName("subscriptionName")
+                .defaultCryptoKeyReader((Map<String, String>) null);
+    }
+
+    @Test(expectedExceptions = IllegalArgumentException.class)
+    public void testConsumerBuilderImplWhenDefaultCryptoKeyReaderIsEmptyMap() {
+        consumerBuilderImpl.topic(TOPIC_NAME).subscriptionName("subscriptionName")
+                .defaultCryptoKeyReader(new HashMap<String, String>());
+    }
+
     @Test(expectedExceptions = NullPointerException.class)
     public void testConsumerBuilderImplWhenCryptoFailureActionIsNull() {
         consumerBuilderImpl.topic(TOPIC_NAME)
@@ -237,8 +260,13 @@ public class ConsumerBuilderImplTest {
     }
 
     @Test(expectedExceptions = IllegalArgumentException.class)
-    public void testConsumerBuilderImplWhenPatternAutoDiscoveryPeriodPropertyIsNegative() {
+    public void testConsumerBuilderImplWhenPatternAutoDiscoveryPeriodPeriodInMinutesIsNegative() {
         consumerBuilderImpl.patternAutoDiscoveryPeriod(-1);
+    }
+
+    @Test(expectedExceptions = IllegalArgumentException.class)
+    public void testConsumerBuilderImplWhenPatternAutoDiscoveryPeriodPeriodIsNegative() {
+        consumerBuilderImpl.patternAutoDiscoveryPeriod(-1, TimeUnit.MINUTES);
     }
 
     @Test(expectedExceptions = IllegalArgumentException.class)
@@ -261,6 +289,12 @@ public class ConsumerBuilderImplTest {
         consumerBuilderImpl.priorityLevel(1);
         consumerBuilderImpl.maxTotalReceiverQueueSizeAcrossPartitions(1);
         consumerBuilderImpl.patternAutoDiscoveryPeriod(1);
+        consumerBuilderImpl.patternAutoDiscoveryPeriod(1, TimeUnit.SECONDS);
     }
 
+    @Test
+    public void testConsumerMode() {
+        consumerBuilderImpl.subscriptionMode(SubscriptionMode.NonDurable)
+            .subscriptionInitialPosition(SubscriptionInitialPosition.Earliest);
+    }
 }

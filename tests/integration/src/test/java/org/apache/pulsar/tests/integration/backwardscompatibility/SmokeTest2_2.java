@@ -32,5 +32,4 @@ public class SmokeTest2_2 extends PulsarStandaloneTestSuite2_2 {
     public void testBatchMessagePublishAndConsume(String serviceUrl, boolean isPersistent) throws Exception {
         super.testBatchMessagePublishAndConsume(serviceUrl, isPersistent);
     }
-
 }

@@ -26,12 +26,11 @@ import static org.testng.Assert.fail;
 import org.apache.pulsar.common.util.Codec;
 import org.testng.annotations.Test;
 
-@Test
 public class TopicNameTest {
 
     @SuppressWarnings("deprecation")
     @Test
-    void topic() {
+    public void topic() {
         try {
             TopicName.get("://tenant.namespace:topic").getNamespace();
             fail("Should have thrown exception");
@@ -200,6 +199,11 @@ public class TopicNameTest {
         assertEquals(topicName.getPartitionIndex(), -1);
 
         assertEquals(TopicName.getPartitionIndex("persistent://myprop/mycolo/myns/mytopic-partition-4"), 4);
+
+        // NOTE: Following behavior is not right actually, but for the backward compatibility, it shouldn't be changed
+        assertEquals(TopicName.getPartitionIndex("mytopic-partition--1"), 1);
+        assertEquals(TopicName.getPartitionIndex("mytopic-partition-00"), 0);
+        assertEquals(TopicName.getPartitionIndex("mytopic-partition-012"), 12);
     }
 
     @Test

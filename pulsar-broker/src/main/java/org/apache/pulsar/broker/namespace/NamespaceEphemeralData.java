@@ -19,6 +19,11 @@
 package org.apache.pulsar.broker.namespace;
 
 import com.google.common.base.MoreObjects;
+import com.google.common.collect.Maps;
+import java.util.Collections;
+import java.util.Map;
+import javax.validation.constraints.NotNull;
+import org.apache.pulsar.policies.data.loadbalancer.AdvertisedListener;
 
 public class NamespaceEphemeralData {
     private String nativeUrl;
@@ -26,17 +31,28 @@ public class NamespaceEphemeralData {
     private String httpUrl;
     private String httpUrlTls;
     private boolean disabled;
+    private Map<String, AdvertisedListener> advertisedListeners;
 
     public NamespaceEphemeralData() {
     }
 
     public NamespaceEphemeralData(String brokerUrl, String brokerUrlTls, String httpUrl, String httpUrlTls,
             boolean disabled) {
+        this(brokerUrl, brokerUrlTls, httpUrl, httpUrlTls, disabled, null);
+    }
+
+    public NamespaceEphemeralData(String brokerUrl, String brokerUrlTls, String httpUrl, String httpUrlTls,
+                                  boolean disabled, Map<String, AdvertisedListener> advertisedListeners) {
         this.nativeUrl = brokerUrl;
         this.nativeUrlTls = brokerUrlTls;
         this.httpUrl = httpUrl;
         this.httpUrlTls = httpUrlTls;
         this.disabled = disabled;
+        if (advertisedListeners == null) {
+            this.advertisedListeners = Collections.EMPTY_MAP;
+        } else {
+            this.advertisedListeners = Maps.newHashMap(advertisedListeners);
+        }
     }
 
     public String getNativeUrl() {
@@ -63,9 +79,17 @@ public class NamespaceEphemeralData {
         this.disabled = flag;
     }
 
+    @NotNull
+    public Map<String, AdvertisedListener> getAdvertisedListeners() {
+        if (this.advertisedListeners == null) {
+            return Collections.EMPTY_MAP;
+        }
+        return Collections.unmodifiableMap(this.advertisedListeners);
+    }
+
     @Override
     public String toString() {
         return MoreObjects.toStringHelper(this).add("nativeUrl", nativeUrl).add("httpUrl", httpUrl)
-                .add("disabled", disabled).toString();
+                .add("disabled", disabled).add("advertisedListeners", getAdvertisedListeners()).toString();
     }
 }

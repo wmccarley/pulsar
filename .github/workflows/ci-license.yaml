@@ -22,8 +22,12 @@ on:
   pull_request:
     branches:
       - master
-    paths-ignore:
-      - '**.md'
+  push:
+    branches:
+      - branch-*
+
+env:
+  MAVEN_OPTS: -Dhttp.keepAlive=false -Dmaven.wagon.http.pool=false -Dmaven.wagon.http.retryHandler.class=standard -Dmaven.wagon.http.retryHandler.count=3
 
 jobs:
 
@@ -33,19 +37,53 @@ jobs:
     timeout-minutes: 60
 
     steps:
+      - name: checkout
+        uses: actions/checkout@v2
+
+      - name: Changed files check
+        id:   changes
+        uses: apache/pulsar-test-infra/paths-filter@master
+        with:
+          filters: |
+            # pattern syntax: https://github.com/micromatch/picomatch
+            all:
+              - '**'
+            docs:
+              - 'site2/**'
+              - 'deployment/**'
+              - '.asf.yaml'
+              - '*.md'
+              - '**/*.md'
+
+      - name: Cache local Maven repository
+        if: ${{ steps.changes.outputs.all_count > steps.changes.outputs.docs_count }}
+        uses: actions/cache@v2
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}
+          restore-keys: |
+            ${{ runner.os }}-maven-
+
       - name: Set up JDK 1.8
+        if: ${{ steps.changes.outputs.all_count > steps.changes.outputs.docs_count }}
         uses: actions/setup-java@v1
         with:
           java-version: 1.8
 
-      - name: checkout
-        uses: actions/checkout@v1
+      - name: Replace maven's wagon-http version
+        run: sudo ./build/replace_maven-wagon-http-version.sh
 
-      - name: Setup Maven Version
-        run: mvn -B --version
+      # license check fails with 3.6.2 so we have to downgrade
+      - name: Set up Maven
+        if: ${{ steps.changes.outputs.all_count > steps.changes.outputs.docs_count }}
+        uses: apache/pulsar-test-infra/setup-maven@master
+        with:
+          maven-version: 3.6.1
 
-      - name: run unit tests
-        run: mvn -B -ntp -DskipTests license:check install
-          
+      - name: build and check license
+        if: ${{ steps.changes.outputs.all_count > steps.changes.outputs.docs_count }}
+        run: mvn -q -B -ntp -DskipTests apache-rat:check initialize license:check install
+
       - name: license check
+        if: ${{ steps.changes.outputs.all_count > steps.changes.outputs.docs_count }}
         run: src/check-binary-license ./distribution/server/target/apache-pulsar-*-bin.tar.gz

@@ -20,10 +20,10 @@ package org.apache.pulsar.common.util.collections;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
-
 import com.google.common.collect.Lists;
 import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 import java.util.concurrent.locks.StampedLock;
 import java.util.function.LongFunction;
 
@@ -153,14 +153,14 @@ public class ConcurrentLongHashMap<V> {
     }
 
     public void clear() {
-        for (Section<V> s : sections) {
-            s.clear();
+        for (int i = 0; i < sections.length; i++) {
+            sections[i].clear();
         }
     }
 
     public void forEach(EntryProcessor<V> processor) {
-        for (Section<V> s : sections) {
-            s.forEach(processor);
+        for (int i = 0; i < sections.length; i++) {
+            sections[i].forEach(processor);
         }
     }
 
@@ -195,6 +195,9 @@ public class ConcurrentLongHashMap<V> {
         private volatile V[] values;
 
         private volatile int capacity;
+        private static final AtomicIntegerFieldUpdater<Section> SIZE_UPDATER =
+                AtomicIntegerFieldUpdater.newUpdater(Section.class, "size");
+
         private volatile int size;
         private int usedBuckets;
         private int resizeThreshold;
@@ -282,12 +285,12 @@ public class ConcurrentLongHashMap<V> {
                     if (storedKey == key) {
                         if (storedValue == EmptyValue) {
                             values[bucket] = value != null ? value : valueProvider.apply(key);
-                            ++size;
+                            SIZE_UPDATER.incrementAndGet(this);
                             ++usedBuckets;
                             return valueProvider != null ? values[bucket] : null;
                         } else if (storedValue == DeletedValue) {
                             values[bucket] = value != null ? value : valueProvider.apply(key);
-                            ++size;
+                            SIZE_UPDATER.incrementAndGet(this);
                             return valueProvider != null ? values[bucket] : null;
                         } else if (!onlyIfAbsent) {
                             // Over written an old value for same key
@@ -307,7 +310,7 @@ public class ConcurrentLongHashMap<V> {
 
                         keys[bucket] = key;
                         values[bucket] = value != null ? value : valueProvider.apply(key);
-                        ++size;
+                        SIZE_UPDATER.incrementAndGet(this);
                         return valueProvider != null ? values[bucket] : null;
                     } else if (storedValue == DeletedValue) {
                         // The bucket contained a different deleted key
@@ -348,7 +351,7 @@ public class ConcurrentLongHashMap<V> {
                                 return null;
                             }
 
-                            --size;
+                            SIZE_UPDATER.decrementAndGet(this);
                             V nextValueInArray = values[signSafeMod(bucket + 1, capacity)];
                             if (nextValueInArray == EmptyValue) {
                                 values[bucket] = (V) EmptyValue;
@@ -390,46 +393,48 @@ public class ConcurrentLongHashMap<V> {
         public void forEach(EntryProcessor<V> processor) {
             long stamp = tryOptimisticRead();
 
+            // We need to make sure that we read these 3 variables in a consistent way
             int capacity = this.capacity;
             long[] keys = this.keys;
             V[] values = this.values;
 
-            boolean acquiredReadLock = false;
+            // Validate no rehashing
+            if (!validate(stamp)) {
+                // Fallback to read lock
+                stamp = readLock();
 
-            try {
+                capacity = this.capacity;
+                keys = this.keys;
+                values = this.values;
+                unlockRead(stamp);
+            }
 
-                // Validate no rehashing
-                if (!validate(stamp)) {
-                    // Fallback to read lock
-                    stamp = readLock();
-                    acquiredReadLock = true;
-
-                    capacity = this.capacity;
-                    keys = this.keys;
-                    values = this.values;
+            // Go through all the buckets for this section. We try to renew the stamp only after a validation
+            // error, otherwise we keep going with the same.
+            for (int bucket = 0; bucket < capacity; bucket++) {
+                if (stamp == 0) {
+                    stamp = tryOptimisticRead();
                 }
 
-                // Go through all the buckets for this section
-                for (int bucket = 0; bucket < capacity; bucket++) {
-                    long storedKey = keys[bucket];
-                    V storedValue = values[bucket];
+                long storedKey = keys[bucket];
+                V storedValue = values[bucket];
 
-                    if (!acquiredReadLock && !validate(stamp)) {
-                        // Fallback to acquiring read lock
-                        stamp = readLock();
-                        acquiredReadLock = true;
+                if (!validate(stamp)) {
+                    // Fallback to acquiring read lock
+                    stamp = readLock();
 
+                    try {
                         storedKey = keys[bucket];
                         storedValue = values[bucket];
+                    } finally {
+                        unlockRead(stamp);
                     }
 
-                    if (storedValue != DeletedValue && storedValue != EmptyValue) {
-                        processor.accept(storedKey, storedValue);
-                    }
+                    stamp = 0;
                 }
-            } finally {
-                if (acquiredReadLock) {
-                    unlockRead(stamp);
+
+                if (storedValue != DeletedValue && storedValue != EmptyValue) {
+                    processor.accept(storedKey, storedValue);
                 }
             }
         }

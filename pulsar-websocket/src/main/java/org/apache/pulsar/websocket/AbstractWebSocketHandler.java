@@ -18,29 +18,41 @@
  */
 package org.apache.pulsar.websocket;
 
-import static com.google.common.base.Preconditions.checkArgument;
-
-import java.io.Closeable;
-import java.io.IOException;
-import java.util.List;
-import java.util.Map;
-import java.util.TreeMap;
-
-import javax.naming.AuthenticationException;
-import javax.servlet.http.HttpServletRequest;
-import javax.servlet.http.HttpServletResponse;
-
+import com.google.common.base.Splitter;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.pulsar.broker.authentication.AuthenticationDataHttps;
 import org.apache.pulsar.broker.authentication.AuthenticationDataSource;
+import org.apache.pulsar.client.api.PulsarClientException.AuthenticationException;
+import org.apache.pulsar.client.api.PulsarClientException.AuthorizationException;
+import org.apache.pulsar.client.api.PulsarClientException.ConsumerBusyException;
+import org.apache.pulsar.client.api.PulsarClientException.IncompatibleSchemaException;
+import org.apache.pulsar.client.api.PulsarClientException.NotFoundException;
+import org.apache.pulsar.client.api.PulsarClientException.ProducerBlockedQuotaExceededError;
+import org.apache.pulsar.client.api.PulsarClientException.ProducerBlockedQuotaExceededException;
+import org.apache.pulsar.client.api.PulsarClientException.ProducerBusyException;
+import org.apache.pulsar.client.api.PulsarClientException.ProducerFencedException;
+import org.apache.pulsar.client.api.PulsarClientException.TimeoutException;
+import org.apache.pulsar.client.api.PulsarClientException.TooManyRequestsException;
+import org.apache.pulsar.client.api.PulsarClientException.TopicDoesNotExistException;
+import org.apache.pulsar.client.api.PulsarClientException.TopicTerminatedException;
 import org.apache.pulsar.common.naming.NamespaceName;
 import org.apache.pulsar.common.naming.TopicName;
+import org.apache.pulsar.common.util.Codec;
 import org.eclipse.jetty.websocket.api.Session;
 import org.eclipse.jetty.websocket.api.WebSocketAdapter;
 import org.eclipse.jetty.websocket.servlet.ServletUpgradeResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import com.google.common.base.Splitter;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
+import java.io.Closeable;
+import java.io.IOException;
+import java.util.List;
+import java.util.Map;
+import java.util.TreeMap;
+
+import static com.google.common.base.Preconditions.checkArgument;
 
 public abstract class AbstractWebSocketHandler extends WebSocketAdapter implements Closeable {
 
@@ -53,7 +65,7 @@ public abstract class AbstractWebSocketHandler extends WebSocketAdapter implemen
 
     public AbstractWebSocketHandler(WebSocketService service, HttpServletRequest request, ServletUpgradeResponse response) {
         this.service = service;
-        this.request = request;
+        this.request = new WebSocketHttpServletRequestWrapper(request);
         this.topic = extractTopicName(request);
 
         this.queryParams = new TreeMap<>();
@@ -64,14 +76,13 @@ public abstract class AbstractWebSocketHandler extends WebSocketAdapter implemen
 
     protected boolean checkAuth(ServletUpgradeResponse response) {
         String authRole = "<none>";
-        AuthenticationDataSource authenticationData = new AuthenticationDataHttps(request);
         if (service.isAuthenticationEnabled()) {
             try {
                 authRole = service.getAuthenticationService().authenticateHttpRequest(request);
                 log.info("[{}:{}] Authenticated WebSocket client {} on topic {}", request.getRemoteAddr(),
                         request.getRemotePort(), authRole, topic);
 
-            } catch (AuthenticationException e) {
+            } catch (javax.naming.AuthenticationException e) {
                 log.warn("[{}:{}] Failed to authenticated WebSocket client {} on topic {}: {}", request.getRemoteAddr(),
                         request.getRemotePort(), authRole, topic, e.getMessage());
                 try {
@@ -85,6 +96,7 @@ public abstract class AbstractWebSocketHandler extends WebSocketAdapter implemen
         }
 
         if (service.isAuthorizationEnabled()) {
+            AuthenticationDataSource authenticationData = new AuthenticationDataHttps(request);
             try {
                 if (!isAuthorized(authRole, authenticationData)) {
                     log.warn("[{}:{}] WebSocket Client [{}] is not authorized on topic {}", request.getRemoteAddr(),
@@ -105,6 +117,38 @@ public abstract class AbstractWebSocketHandler extends WebSocketAdapter implemen
             }
         }
         return true;
+    }
+
+    protected static int getErrorCode(Exception e) {
+        if (e instanceof IllegalArgumentException) {
+            return HttpServletResponse.SC_BAD_REQUEST;
+        } else if (e instanceof AuthenticationException) {
+            return HttpServletResponse.SC_UNAUTHORIZED;
+        } else if (e instanceof AuthorizationException) {
+            return HttpServletResponse.SC_FORBIDDEN;
+        } else if (e instanceof NotFoundException || e instanceof TopicDoesNotExistException) {
+            return HttpServletResponse.SC_NOT_FOUND;
+        } else if (e instanceof ProducerBusyException || e instanceof ConsumerBusyException
+                || e instanceof ProducerFencedException || e instanceof IncompatibleSchemaException) {
+            return HttpServletResponse.SC_CONFLICT;
+        } else if (e instanceof TooManyRequestsException) {
+            return 429; // Too Many Requests
+        } else if (e instanceof ProducerBlockedQuotaExceededError || e instanceof ProducerBlockedQuotaExceededException
+                || e instanceof TopicTerminatedException) {
+            return HttpServletResponse.SC_SERVICE_UNAVAILABLE;
+        } else if (e instanceof TimeoutException) {
+            return HttpServletResponse.SC_GATEWAY_TIMEOUT;
+        } else {
+            return HttpServletResponse.SC_INTERNAL_SERVER_ERROR;
+        }
+    }
+
+    protected static String getErrorMessage(Exception e) {
+        if (e instanceof IllegalArgumentException) {
+            return "Invalid query params: " + e.getMessage();
+        } else {
+            return "Failed to create producer/consumer: " + e.getMessage();
+        }
     }
 
     @Override
@@ -181,7 +225,18 @@ public abstract class AbstractWebSocketHandler extends WebSocketAdapter implemen
         final String domain = parts.get(domainIndex);
         final NamespaceName namespace = isV2Format ? NamespaceName.get(parts.get(5), parts.get(6)) :
                 NamespaceName.get( parts.get(4), parts.get(5), parts.get(6));
-        final String name = parts.get(7);
+        //The topic name which contains slashes is also split ， so it needs to be jointed
+        int startPosition = 7;
+        boolean isConsumer = "consumer".equals(parts.get(2)) || "consumer".equals(parts.get(3));
+        int endPosition = isConsumer ? parts.size() -1 : parts.size();
+        StringBuilder topicName = new StringBuilder(parts.get(startPosition));
+        while (++startPosition < endPosition) {
+            if(StringUtils.isEmpty(parts.get(startPosition))){
+               continue;
+            }
+            topicName.append("/").append(parts.get(startPosition));
+        }
+        final String name = Codec.decode(topicName.toString());
 
         return TopicName.get(domain, namespace, name);
     }

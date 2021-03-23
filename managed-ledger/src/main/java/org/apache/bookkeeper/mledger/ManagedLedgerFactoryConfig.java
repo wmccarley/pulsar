@@ -19,10 +19,14 @@
 package org.apache.bookkeeper.mledger;
 
 import lombok.Data;
+import org.apache.bookkeeper.common.annotation.InterfaceAudience;
+import org.apache.bookkeeper.common.annotation.InterfaceStability;
 
 /**
  * Configuration for a {@link ManagedLedgerFactory}.
  */
+@InterfaceAudience.LimitedPrivate
+@InterfaceStability.Stable
 @Data
 public class ManagedLedgerFactoryConfig {
     private static final long MB = 1024 * 1024;
@@ -48,12 +52,27 @@ public class ManagedLedgerFactoryConfig {
     private long cacheEvictionTimeThresholdMillis = 1000;
 
     /**
-     * Threshould to consider a cursor as "backlogged"
-     */
-    private long thresholdBackloggedCursor = 1000;
-
-    /**
      * Whether we should make a copy of the entry payloads when inserting in cache
      */
     private boolean copyEntriesInCache = false;
+
+    /**
+     * Whether trace managed ledger task execution time
+     */
+    private boolean traceTaskExecution = true;
+
+    /**
+     * Managed ledger prometheus stats Latency Rollover Seconds
+     */
+    private int prometheusStatsLatencyRolloverSeconds = 60;
+
+    /**
+     * How frequently to flush the cursor positions that were accumulated due to rate limiting.
+     */
+    private int cursorPositionFlushSeconds = 60;
+
+    /**
+     * cluster name for prometheus stats
+     */
+    private String clusterName;
 }

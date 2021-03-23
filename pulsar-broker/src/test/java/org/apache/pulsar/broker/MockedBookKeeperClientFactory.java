@@ -31,6 +31,7 @@ import org.apache.bookkeeper.client.BookKeeper;
 import org.apache.bookkeeper.client.EnsemblePlacementPolicy;
 import org.apache.bookkeeper.client.PulsarMockBookKeeper;
 
+import org.apache.bookkeeper.stats.StatsLogger;
 import org.apache.zookeeper.ZooKeeper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -61,10 +62,17 @@ public class MockedBookKeeperClientFactory implements BookKeeperClientFactory {
     }
 
     @Override
+    public BookKeeper create(ServiceConfiguration conf, ZooKeeper zkClient,
+                             Optional<Class<? extends EnsemblePlacementPolicy>> ensemblePlacementPolicyClass,
+                             Map<String, Object> properties, StatsLogger statsLogger) throws IOException {
+        return mockedBk;
+    }
+
+    @Override
     public void close() {
         try {
             mockedBk.close();
-        } catch (BKException | InterruptedException e) {
+        } catch (BKException | InterruptedException ignored) {
         }
         executor.shutdown();
     }

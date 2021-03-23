@@ -23,13 +23,17 @@ import io.airlift.configuration.Config;
 import java.io.IOException;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Properties;
 import java.util.regex.Matcher;
 import javax.validation.constraints.NotNull;
+import javax.ws.rs.client.ClientBuilder;
 import org.apache.bookkeeper.stats.NullStatsProvider;
 import org.apache.pulsar.client.admin.PulsarAdmin;
 import org.apache.pulsar.client.admin.PulsarAdminBuilder;
 import org.apache.pulsar.client.api.PulsarClientException;
 import org.apache.pulsar.common.naming.NamedEntity;
+import org.apache.pulsar.common.nar.NarClassLoader;
+import org.apache.pulsar.common.policies.data.OffloadPolicies;
 import org.apache.pulsar.common.protocol.Commands;
 
 /**
@@ -43,6 +47,7 @@ public class PulsarConnectorConfig implements AutoCloseable {
     private int targetNumSplits = 2;
     private int maxSplitMessageQueueSize = 10000;
     private int maxSplitEntryQueueSize = 1000;
+    private long maxSplitQueueSizeBytes = -1;
     private int maxMessageSize = Commands.DEFAULT_MAX_MESSAGE_SIZE;
     private String statsProvider = NullStatsProvider.class.getName();
 
@@ -63,6 +68,21 @@ public class PulsarConnectorConfig implements AutoCloseable {
     private Map<String, String> offloaderProperties = new HashMap<>();
 
     private PulsarAdmin pulsarAdmin;
+
+    // --- Bookkeeper
+    private int bookkeeperThrottleValue = 0;
+    private int bookkeeperNumIOThreads = 2 * Runtime.getRuntime().availableProcessors();
+    private int bookkeeperNumWorkerThreads = Runtime.getRuntime().availableProcessors();
+    private boolean bookkeeperUseV2Protocol = true;
+    private int bookkeeperExplicitInterval = 0;
+
+    // --- ManagedLedger
+    private long managedLedgerCacheSizeMB = 0L;
+    private int managedLedgerNumWorkerThreads = Runtime.getRuntime().availableProcessors();
+    private int managedLedgerNumSchedulerThreads = Runtime.getRuntime().availableProcessors();
+
+    // --- Nar extraction
+    private String narExtractionDirectory = NarClassLoader.DEFAULT_NAR_EXTRACTION_DIR;
 
     @NotNull
     public String getBrokerServiceUrl() {
@@ -137,6 +157,17 @@ public class PulsarConnectorConfig implements AutoCloseable {
     @Config("pulsar.max-split-entry-queue-size")
     public PulsarConnectorConfig setMaxSplitEntryQueueSize(int maxSplitEntryQueueSize) {
         this.maxSplitEntryQueueSize = maxSplitEntryQueueSize;
+        return this;
+    }
+
+    @NotNull
+    public long getMaxSplitQueueSizeBytes() {
+        return this.maxSplitQueueSizeBytes;
+    }
+
+    @Config("pulsar.max-split-queue-cache-size")
+    public PulsarConnectorConfig setMaxSplitQueueSizeBytes(long maxSplitQueueSizeBytes) {
+        this.maxSplitQueueSizeBytes = maxSplitQueueSizeBytes;
         return this;
     }
 
@@ -285,6 +316,100 @@ public class PulsarConnectorConfig implements AutoCloseable {
         return this;
     }
 
+    // --- Bookkeeper Config ---
+
+    public int getBookkeeperThrottleValue() {
+        return bookkeeperThrottleValue;
+    }
+
+    @Config("pulsar.bookkeeper-throttle-value")
+    public PulsarConnectorConfig setBookkeeperThrottleValue(int bookkeeperThrottleValue) {
+        this.bookkeeperThrottleValue = bookkeeperThrottleValue;
+        return this;
+    }
+
+    public int getBookkeeperNumIOThreads() {
+        return bookkeeperNumIOThreads;
+    }
+
+    @Config("pulsar.bookkeeper-num-io-threads")
+    public PulsarConnectorConfig setBookkeeperNumIOThreads(int bookkeeperNumIOThreads) {
+        this.bookkeeperNumIOThreads = bookkeeperNumIOThreads;
+        return this;
+    }
+
+    public int getBookkeeperNumWorkerThreads() {
+        return bookkeeperNumWorkerThreads;
+    }
+
+    @Config("pulsar.bookkeeper-num-worker-threads")
+    public PulsarConnectorConfig setBookkeeperNumWorkerThreads(int bookkeeperNumWorkerThreads) {
+        this.bookkeeperNumWorkerThreads = bookkeeperNumWorkerThreads;
+        return this;
+    }
+
+    public boolean getBookkeeperUseV2Protocol() {
+        return bookkeeperUseV2Protocol;
+    }
+
+    @Config("pulsar.bookkeeper-use-v2-protocol")
+    public PulsarConnectorConfig setBookkeeperUseV2Protocol(boolean bookkeeperUseV2Protocol) {
+        this.bookkeeperUseV2Protocol = bookkeeperUseV2Protocol;
+        return this;
+    }
+
+    public int getBookkeeperExplicitInterval() {
+        return bookkeeperExplicitInterval;
+    }
+
+    @Config("pulsar.bookkeeper-explicit-interval")
+    public PulsarConnectorConfig setBookkeeperExplicitInterval(int bookkeeperExplicitInterval) {
+        this.bookkeeperExplicitInterval = bookkeeperExplicitInterval;
+        return this;
+    }
+
+    // --- ManagedLedger
+    public long getManagedLedgerCacheSizeMB() {
+        return managedLedgerCacheSizeMB;
+    }
+
+    @Config("pulsar.managed-ledger-cache-size-MB")
+    public PulsarConnectorConfig setManagedLedgerCacheSizeMB(int managedLedgerCacheSizeMB) {
+        this.managedLedgerCacheSizeMB = managedLedgerCacheSizeMB * 1024 * 1024;
+        return this;
+    }
+
+    public int getManagedLedgerNumWorkerThreads() {
+        return managedLedgerNumWorkerThreads;
+    }
+
+    @Config("pulsar.managed-ledger-num-worker-threads")
+    public PulsarConnectorConfig setManagedLedgerNumWorkerThreads(int managedLedgerNumWorkerThreads) {
+        this.managedLedgerNumWorkerThreads = managedLedgerNumWorkerThreads;
+        return this;
+    }
+
+    public int getManagedLedgerNumSchedulerThreads() {
+        return managedLedgerNumSchedulerThreads;
+    }
+
+    @Config("pulsar.managed-ledger-num-scheduler-threads")
+    public PulsarConnectorConfig setManagedLedgerNumSchedulerThreads(int managedLedgerNumSchedulerThreads) {
+        this.managedLedgerNumSchedulerThreads = managedLedgerNumSchedulerThreads;
+        return this;
+    }
+
+    // --- Nar extraction config
+    public String getNarExtractionDirectory() {
+        return narExtractionDirectory;
+    }
+
+    @Config("pulsar.nar-extraction-directory")
+    public PulsarConnectorConfig setNarExtractionDirectory(String narExtractionDirectory) {
+        this.narExtractionDirectory = narExtractionDirectory;
+        return this;
+    }
+
     @NotNull
     public PulsarAdmin getPulsarAdmin() throws PulsarClientException {
         if (this.pulsarAdmin == null) {
@@ -306,9 +431,20 @@ public class PulsarConnectorConfig implements AutoCloseable {
                 builder.tlsTrustCertsFilePath(getTlsTrustCertsFilePath());
             }
 
+            builder.setContextClassLoader(ClientBuilder.class.getClassLoader());
             this.pulsarAdmin = builder.serviceHttpUrl(getBrokerServiceUrl()).build();
         }
         return this.pulsarAdmin;
+    }
+
+    public OffloadPolicies getOffloadPolices() {
+        Properties offloadProperties = new Properties();
+        offloadProperties.putAll(getOffloaderProperties());
+        OffloadPolicies offloadPolicies = OffloadPolicies.create(offloadProperties);
+        offloadPolicies.setManagedLedgerOffloadDriver(getManagedLedgerOffloadDriver());
+        offloadPolicies.setManagedLedgerOffloadMaxThreads(getManagedLedgerOffloadMaxThreads());
+        offloadPolicies.setOffloadersDirectory(getOffloadersDirectory());
+        return offloadPolicies;
     }
 
     @Override

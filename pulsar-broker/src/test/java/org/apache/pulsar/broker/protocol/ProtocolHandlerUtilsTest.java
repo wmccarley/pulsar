@@ -44,6 +44,7 @@ import org.testng.annotations.Test;
     ProtocolHandlerUtils.class, NarClassLoader.class
 })
 @PowerMockIgnore({"org.apache.logging.log4j.*"})
+@Test(groups = "broker")
 public class ProtocolHandlerUtilsTest {
 
     // Necessary to make PowerMockito.mockStatic work with TestNG.
@@ -75,10 +76,11 @@ public class ProtocolHandlerUtilsTest {
         PowerMockito.when(NarClassLoader.getFromArchive(
             any(File.class),
             any(Set.class),
-            any(ClassLoader.class)
+            any(ClassLoader.class),
+            any(String.class)
         )).thenReturn(mockLoader);
 
-        ProtocolHandlerWithClassLoader returnedPhWithCL = ProtocolHandlerUtils.load(metadata);
+        ProtocolHandlerWithClassLoader returnedPhWithCL = ProtocolHandlerUtils.load(metadata, "");
         ProtocolHandler returnedPh = returnedPhWithCL.getHandler();
 
         assertSame(mockLoader, returnedPhWithCL.getClassLoader());
@@ -107,11 +109,12 @@ public class ProtocolHandlerUtilsTest {
         PowerMockito.when(NarClassLoader.getFromArchive(
             any(File.class),
             any(Set.class),
-            any(ClassLoader.class)
+            any(ClassLoader.class),
+            any(String.class)
         )).thenReturn(mockLoader);
 
         try {
-            ProtocolHandlerUtils.load(metadata);
+            ProtocolHandlerUtils.load(metadata, "");
             fail("Should not reach here");
         } catch (IOException ioe) {
             // expected
@@ -141,11 +144,12 @@ public class ProtocolHandlerUtilsTest {
         PowerMockito.when(NarClassLoader.getFromArchive(
             any(File.class),
             any(Set.class),
-            any(ClassLoader.class)
+            any(ClassLoader.class),
+            any(String.class)
         )).thenReturn(mockLoader);
 
         try {
-            ProtocolHandlerUtils.load(metadata);
+            ProtocolHandlerUtils.load(metadata, "");
             fail("Should not reach here");
         } catch (IOException ioe) {
             // expected

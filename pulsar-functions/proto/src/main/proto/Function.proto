@@ -32,6 +32,7 @@ enum ProcessingGuarantees {
 enum SubscriptionType {
     SHARED = 0;
     FAILOVER = 1;
+    KEY_SHARED = 2;
 }
 
 enum SubscriptionPosition {
@@ -81,6 +82,13 @@ message FunctionDetails {
     string runtimeFlags = 17;
     ComponentType componentType = 18;
     string customRuntimeOptions = 19;
+    /* If specified, this will refer to an archive that is
+     * already present in the server */
+    string builtin = 20;
+    bool retainOrdering = 21;
+    bool retainKeyOrdering = 22;
+    SubscriptionPosition subscriptionPosition = 23;
+    string externalPulsarsMap = 24;
 }
 
 message ConsumerSpec {
@@ -91,6 +99,41 @@ message ConsumerSpec {
         int32 value = 1;
     }
     ReceiverQueueSize receiverQueueSize = 4;
+    map<string, string> schemaProperties = 5;
+    map<string, string> consumerProperties = 6;
+    CryptoSpec cryptoSpec = 7;
+}
+
+message ProducerSpec {
+    int32 maxPendingMessages = 1;
+    int32 maxPendingMessagesAcrossPartitions = 2;
+    bool useThreadLocalProducers = 3;
+    CryptoSpec cryptoSpec = 4;
+    string batchBuilder = 5;
+}
+
+message CryptoSpec {
+    enum FailureAction {
+        FAIL = 0;
+
+        DISCARD = 1;
+        CONSUME = 2;
+
+        SEND = 10;
+    }
+
+    string cryptoKeyReaderClassName = 1;
+    string cryptoKeyReaderConfig = 2;
+
+    // key names used by producer to encrypt data
+    repeated string producerEncryptionKeyName = 3;
+    // define the action if producer fail to encrypt data
+    // one of FAIL, SEND
+    FailureAction producerCryptoFailureAction = 4;
+
+    // define the action if consumer fail to decrypt data
+    // one of FAIL, DISCARD, CONSUME
+    FailureAction consumerCryptoFailureAction = 5;
 }
 
 message SourceSpec {
@@ -119,6 +162,7 @@ message SourceSpec {
     string subscriptionName = 9;
     bool cleanupSubscription = 11;
     SubscriptionPosition subscriptionPosition = 12;
+    uint64 negativeAckRedeliveryDelayMs = 13;
 }
 
 message SinkSpec {
@@ -129,6 +173,7 @@ message SinkSpec {
 
     // configs used only when functions output to sink
     string topic = 3;
+    ProducerSpec producerSpec = 11;
 
     string serDeClassName = 4;
 
@@ -140,6 +185,12 @@ message SinkSpec {
      * Builtin schema type or custom schema class name
      */
     string schemaType = 7;
+
+    bool forwardSourceMessageProperty = 8;
+
+    map<string, string> schemaProperties = 9;
+
+    map<string, string> consumerProperties = 10;
 }
 
 message PackageLocationMetaData {

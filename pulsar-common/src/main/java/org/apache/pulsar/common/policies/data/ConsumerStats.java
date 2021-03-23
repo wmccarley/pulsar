@@ -19,7 +19,7 @@
 package org.apache.pulsar.common.policies.data;
 
 import static com.google.common.base.Preconditions.checkNotNull;
-
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -32,8 +32,17 @@ public class ConsumerStats {
     /** Total throughput delivered to the consumer (bytes/s). */
     public double msgThroughputOut;
 
+    /** Total bytes delivered to consumer (bytes). */
+    public long bytesOutCounter;
+
+    /** Total messages delivered to consumer (msg). */
+    public long msgOutCounter;
+
     /** Total rate of messages redelivered by this consumer (msg/s). */
     public double msgRateRedeliver;
+
+    /** Total chunked messages dispatched. */
+    public double chuckedMessageRate;
 
     /** Name of the consumer. */
     public String consumerName;
@@ -44,8 +53,14 @@ public class ConsumerStats {
     /** Number of unacknowledged messages for the consumer. */
     public int unackedMessages;
 
+    /** Number of average messages per entry for the consumer consumed. */
+    public int avgMessagesPerEntry;
+
     /** Flag to verify if consumer is blocked due to reaching threshold of unacked messages. */
     public boolean blockedConsumerOnUnackedMsgs;
+
+    /** The read position of the cursor when the consumer joining. */
+    public String readPositionWhenJoining;
 
     /** Address of this consumer. */
     private int addressOffset = -1;
@@ -58,6 +73,12 @@ public class ConsumerStats {
     /** Client library version. */
     private int clientVersionOffset = -1;
     private int clientVersionLength;
+
+    public long lastAckedTimestamp;
+    public long lastConsumedTimestamp;
+
+    /** Hash ranges assigned to this consumer if is Key_Shared sub mode. **/
+    public List<String> keyHashRanges;
 
     /** Metadata (key/value strings) associated with this consumer. */
     public Map<String, String> metadata;
@@ -72,10 +93,13 @@ public class ConsumerStats {
         checkNotNull(stats);
         this.msgRateOut += stats.msgRateOut;
         this.msgThroughputOut += stats.msgThroughputOut;
+        this.bytesOutCounter += stats.bytesOutCounter;
+        this.msgOutCounter += stats.msgOutCounter;
         this.msgRateRedeliver += stats.msgRateRedeliver;
         this.availablePermits += stats.availablePermits;
         this.unackedMessages += stats.unackedMessages;
         this.blockedConsumerOnUnackedMsgs = stats.blockedConsumerOnUnackedMsgs;
+        this.readPositionWhenJoining = stats.readPositionWhenJoining;
         return this;
     }
 
@@ -121,5 +145,9 @@ public class ConsumerStats {
         this.clientVersionOffset = this.stringBuffer.length();
         this.clientVersionLength = clientVersion.length();
         this.stringBuffer.append(clientVersion);
+    }
+
+    public String getReadPositionWhenJoining() {
+        return readPositionWhenJoining;
     }
 }

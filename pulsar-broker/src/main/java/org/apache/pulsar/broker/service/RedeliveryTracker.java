@@ -19,7 +19,6 @@
 package org.apache.pulsar.broker.service;
 
 import java.util.List;
-
 import org.apache.bookkeeper.mledger.Position;
 
 public interface RedeliveryTracker {
@@ -33,4 +32,8 @@ public interface RedeliveryTracker {
     void removeBatch(List<Position> positions);
 
     void clear();
+
+    boolean contains(Position position);
+
+    void addIfAbsent(Position position);
 }

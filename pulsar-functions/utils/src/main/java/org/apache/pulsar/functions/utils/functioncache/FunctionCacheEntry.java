@@ -33,9 +33,6 @@ import java.util.stream.Collectors;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 
-import static org.apache.commons.lang3.StringUtils.isNoneBlank;
-import static org.apache.pulsar.functions.utils.functioncache.FunctionCacheEntry.JAVA_INSTANCE_JAR_PROPERTY;
-
 import org.apache.pulsar.common.nar.NarClassLoader;
 
 /**
@@ -71,8 +68,10 @@ public class FunctionCacheEntry implements AutoCloseable {
         this.executionHolders = new HashSet<>(Collections.singleton(initialInstanceId));
     }
 
-    FunctionCacheEntry(String narArchive, String initialInstanceId, ClassLoader rootClassLoader) throws IOException {
-        this.classLoader = NarClassLoader.getFromArchive(new File(narArchive), Collections.emptySet(), rootClassLoader);
+    FunctionCacheEntry(String narArchive, String initialInstanceId, ClassLoader rootClassLoader,
+                       String narExtractionDirectory) throws IOException {
+        this.classLoader = NarClassLoader.getFromArchive(new File(narArchive), Collections.emptySet(),
+                rootClassLoader, narExtractionDirectory);
         this.classpaths = Collections.emptySet();
         this.jarFiles = Collections.singleton(narArchive);
         this.executionHolders = new HashSet<>(Collections.singleton(initialInstanceId));

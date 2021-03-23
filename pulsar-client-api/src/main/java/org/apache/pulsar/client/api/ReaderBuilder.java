@@ -18,9 +18,12 @@
  */
 package org.apache.pulsar.client.api;
 
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import org.apache.pulsar.common.classification.InterfaceAudience;
+import org.apache.pulsar.common.classification.InterfaceStability;
 
 /**
  * {@link ReaderBuilder} is used to configure and create instances of {@link Reader}.
@@ -29,6 +32,8 @@ import java.util.concurrent.TimeUnit;
  *
  * @since 2.0.0
  */
+@InterfaceAudience.Public
+@InterfaceStability.Stable
 public interface ReaderBuilder<T> extends Cloneable {
 
     /**
@@ -106,6 +111,13 @@ public interface ReaderBuilder<T> extends Cloneable {
     ReaderBuilder<T> topic(String topicName);
 
     /**
+     * Specify topics this reader will read from.
+     * @param topicNames
+     * @return
+     */
+    ReaderBuilder<T> topics(List<String> topicNames);
+
+    /**
      * The initial reader positioning is done by specifying a message id. The options are:
      * <ul>
      * <li>{@link MessageId#earliest}: Start reading from the earliest message available in the topic</li>
@@ -166,6 +178,30 @@ public interface ReaderBuilder<T> extends Cloneable {
     ReaderBuilder<T> cryptoKeyReader(CryptoKeyReader cryptoKeyReader);
 
     /**
+     * Sets the default implementation of {@link CryptoKeyReader}.
+     *
+     * <p>Configure the key reader to be used to decrypt the message payloads.
+     *
+     * @param privateKey
+     *            the private key that is always used to decrypt message payloads.
+     * @return the reader builder instance
+     * @since 2.8.0
+     */
+    ReaderBuilder<T> defaultCryptoKeyReader(String privateKey);
+
+    /**
+     * Sets the default implementation of {@link CryptoKeyReader}.
+     *
+     * <p>Configure the key reader to be used to decrypt the message payloads.
+     *
+     * @param privateKeys
+     *            the map of private key names and their URIs used to decrypt message payloads.
+     * @return the reader builder instance
+     * @since 2.8.0
+     */
+    ReaderBuilder<T> defaultCryptoKeyReader(Map<String, String> privateKeys);
+
+    /**
      * Sets the {@link ConsumerCryptoFailureAction} to specify.
      *
      * @param action
@@ -210,6 +246,15 @@ public interface ReaderBuilder<T> extends Cloneable {
     ReaderBuilder<T> subscriptionRolePrefix(String subscriptionRolePrefix);
 
     /**
+     * Set the subscription name.
+     * <p>If subscriptionRolePrefix is set at the same time, this configuration will prevail
+     *
+     * @param subscriptionName
+     * @return the reader builder instance
+     */
+    ReaderBuilder<T> subscriptionName(String subscriptionName);
+
+    /**
      * If enabled, the reader will read messages from the compacted topic rather than reading the full message backlog
      * of the topic. This means that, if the topic has been compacted, the reader will only see the latest value for
      * each key in the topic, up until the point in the topic message backlog that has been compacted. Beyond that
@@ -223,4 +268,16 @@ public interface ReaderBuilder<T> extends Cloneable {
      * @return the reader builder instance
      */
     ReaderBuilder<T> readCompacted(boolean readCompacted);
+
+    /**
+     * Set key hash range of the reader, broker will only dispatch messages which hash of the message key contains by
+     * the specified key hash range. Multiple key hash ranges can be specified on a reader.
+     *
+     * <p>Total hash range size is 65536, so the max end of the range should be less than or equal to 65535.
+     *
+     * @param ranges
+     *            key hash ranges for a reader
+     * @return the reader builder instance
+     */
+    ReaderBuilder<T> keyHashRange(Range... ranges);
 }

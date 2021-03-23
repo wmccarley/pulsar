@@ -33,6 +33,7 @@ public class CommandGenerator {
     public enum Runtime {
         JAVA,
         PYTHON,
+        GO,
     };
     private String functionName;
     private String tenant = "public";
@@ -48,6 +49,7 @@ public class CommandGenerator {
     private Runtime runtime;
     private Integer parallelism;
     private String adminUrl;
+    private String batchBuilder;
     private Integer windowLengthCount;
     private Long windowLengthDurationMs;
     private Integer slidingIntervalCount;
@@ -56,6 +58,7 @@ public class CommandGenerator {
     private Map<String, String> userConfig = new HashMap<>();
     public static final String JAVAJAR = "/pulsar/examples/java-test-functions.jar";
     public static final String PYTHONBASE = "/pulsar/examples/python-examples/";
+    public static final String GOBASE = "/pulsar/examples/go-examples/";
 
     public static CommandGenerator createDefaultGenerator(String sourceTopic, String functionClassName) {
         CommandGenerator generator = new CommandGenerator();
@@ -75,7 +78,7 @@ public class CommandGenerator {
 
     public String generateLocalRunCommand(String codeFile) {
         StringBuilder commandBuilder = new StringBuilder(PulsarCluster.ADMIN_SCRIPT);
-        commandBuilder.append(" functions localrun ");
+        commandBuilder.append(" functions localrun");
         if (adminUrl != null) {
             commandBuilder.append(" --broker-service-url " + adminUrl);
         }
@@ -88,22 +91,33 @@ public class CommandGenerator {
         if (functionName != null) {
             commandBuilder.append(" --name " + functionName);
         }
-        commandBuilder.append(" --className " + functionClassName);
+        if(runtime != Runtime.GO){
+            commandBuilder.append(" --className " + functionClassName);
+        }
         if (sourceTopic != null) {
             commandBuilder.append(" --inputs " + sourceTopic);
         }
         if (sinkTopic != null) {
             commandBuilder.append(" --output " + sinkTopic);
         }
-
-        if (runtime == Runtime.JAVA) {
-            commandBuilder.append(" --jar " + JAVAJAR);
-        } else {
-            if (codeFile != null) {
-                commandBuilder.append(" --py " + PYTHONBASE + codeFile);
-            } else {
-                commandBuilder.append(" --py " + PYTHONBASE);
-            }
+        switch (runtime){
+            case JAVA:
+                commandBuilder.append(" --jar " + JAVAJAR);
+                break;
+            case PYTHON:
+                if (codeFile != null) {
+                    commandBuilder.append(" --py " + PYTHONBASE + codeFile);
+                } else {
+                    commandBuilder.append(" --py " + PYTHONBASE);
+                }
+                break;
+            case GO:
+                if (codeFile != null) {
+                    commandBuilder.append(" --go " + GOBASE + codeFile);
+                } else {
+                    commandBuilder.append(" --go " + GOBASE);
+                }
+                break;
         }
 
         return commandBuilder.toString();
@@ -129,7 +143,9 @@ public class CommandGenerator {
         if (functionName != null) {
             commandBuilder.append(" --name " + functionName);
         }
-        commandBuilder.append(" --className " + functionClassName);
+        if (runtime != Runtime.GO){
+            commandBuilder.append(" --className " + functionClassName);
+        }
         if (sourceTopic != null) {
             commandBuilder.append(" --inputs " + sourceTopic);
         }
@@ -138,6 +154,9 @@ public class CommandGenerator {
         }
         if (logTopic != null) {
             commandBuilder.append(" --logTopic " + logTopic);
+        }
+        if (batchBuilder != null) {
+            commandBuilder.append("--batch-builder" + batchBuilder);
         }
         if (customSereSourceTopics != null && !customSereSourceTopics.isEmpty()) {
             commandBuilder.append(" --customSerdeInputs \'" + new Gson().toJson(customSereSourceTopics) + "\'");
@@ -170,14 +189,24 @@ public class CommandGenerator {
             commandBuilder.append(" --slidingIntervalDurationMs " + slidingIntervalDurationMs);
         }
 
-        if (runtime == Runtime.JAVA) {
-            commandBuilder.append(" --jar " + JAVAJAR);
-        } else {
-            if (codeFile != null) {
-                commandBuilder.append(" --py " + PYTHONBASE + codeFile);
-            } else {
-                commandBuilder.append(" --py " + PYTHONBASE);
-            }
+        switch (runtime){
+            case JAVA:
+                commandBuilder.append(" --jar " + JAVAJAR);
+                break;
+            case PYTHON:
+                if (codeFile != null) {
+                    commandBuilder.append(" --py " + PYTHONBASE + codeFile);
+                } else {
+                    commandBuilder.append(" --py " + PYTHONBASE);
+                }
+                break;
+            case GO:
+                if (codeFile != null) {
+                    commandBuilder.append(" --go " + GOBASE + codeFile);
+                } else {
+                    commandBuilder.append(" --go " + GOBASE);
+                }
+                break;
         }
         return commandBuilder.toString();
     }
@@ -205,12 +234,17 @@ public class CommandGenerator {
         if (functionName != null) {
             commandBuilder.append(" --name " + functionName);
         }
-        commandBuilder.append(" --className " + functionClassName);
+        if (functionClassName != null) {
+            commandBuilder.append(" --className " + functionClassName);
+        }
         if (sourceTopic != null) {
             commandBuilder.append(" --inputs " + sourceTopic);
         }
         if (customSereSourceTopics != null && !customSereSourceTopics.isEmpty()) {
             commandBuilder.append(" --customSerdeInputs \'" + new Gson().toJson(customSereSourceTopics) + "\'");
+        }
+        if (batchBuilder != null) {
+            commandBuilder.append("--batch-builder" + batchBuilder);
         }
         if (sinkTopic != null) {
             commandBuilder.append(" --output " + sinkTopic);
@@ -243,13 +277,25 @@ public class CommandGenerator {
             commandBuilder.append(" --slidingIntervalDurationMs " + slidingIntervalDurationMs);
         }
 
-        if (runtime == Runtime.JAVA) {
-            commandBuilder.append(" --jar " + JAVAJAR);
-        } else {
-            if (codeFile != null) {
-                commandBuilder.append(" --py " + PYTHONBASE + codeFile);
-            } else {
-                commandBuilder.append(" --py " + PYTHONBASE);
+        if (codeFile != null) {
+            switch (runtime) {
+                case JAVA:
+                    commandBuilder.append(" --jar " + JAVAJAR);
+                    break;
+                case PYTHON:
+                    if (codeFile != null) {
+                        commandBuilder.append(" --py " + PYTHONBASE + codeFile);
+                    } else {
+                        commandBuilder.append(" --py " + PYTHONBASE);
+                    }
+                    break;
+                case GO:
+                    if (codeFile != null) {
+                        commandBuilder.append(" --go " + GOBASE + codeFile);
+                    } else {
+                        commandBuilder.append(" --go " + GOBASE);
+                    }
+                    break;
             }
         }
         return commandBuilder.toString();

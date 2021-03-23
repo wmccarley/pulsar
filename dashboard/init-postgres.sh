@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements.  See the NOTICE file
@@ -23,8 +23,8 @@ set -x -e
 rm -rf /data/*
 chown -R postgres: /data
 chmod 700 /data
-sudo -u postgres /usr/lib/postgresql/9.6/bin/initdb /data/
-sudo -u postgres /etc/init.d/postgresql start
+sudo -u postgres /usr/lib/postgresql/11/bin/initdb /data/
+sudo -u postgres /usr/lib/postgresql/11/bin/pg_ctl -D /data/ start
 sudo -u postgres psql --command "CREATE USER docker WITH PASSWORD 'docker';"
 sudo -u postgres createdb -O docker pulsar_dashboard
 

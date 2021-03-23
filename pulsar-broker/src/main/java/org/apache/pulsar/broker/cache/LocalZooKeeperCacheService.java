@@ -21,12 +21,10 @@ package org.apache.pulsar.broker.cache;
 import static com.google.common.base.Preconditions.checkNotNull;
 import static org.apache.pulsar.broker.cache.ConfigurationCacheService.POLICIES_ROOT;
 import static org.apache.pulsar.broker.web.PulsarWebResource.joinPath;
-
 import com.google.common.collect.Maps;
 import java.util.Map.Entry;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
-
 import org.apache.bookkeeper.util.ZkUtils;
 import org.apache.pulsar.broker.PulsarServerException;
 import org.apache.pulsar.broker.namespace.NamespaceEphemeralData;
@@ -34,8 +32,8 @@ import org.apache.pulsar.common.policies.data.LocalPolicies;
 import org.apache.pulsar.common.policies.data.Policies;
 import org.apache.pulsar.common.util.ObjectMapperFactory;
 import org.apache.pulsar.zookeeper.ZooKeeperCache;
-import org.apache.pulsar.zookeeper.ZooKeeperChildrenCache;
 import org.apache.pulsar.zookeeper.ZooKeeperDataCache;
+import org.apache.pulsar.zookeeper.ZooKeeperManagedLedgerCache;
 import org.apache.zookeeper.CreateMode;
 import org.apache.zookeeper.KeeperException;
 import org.apache.zookeeper.ZooDefs.Ids;
@@ -54,7 +52,7 @@ public class LocalZooKeeperCacheService {
     private final ZooKeeperCache cache;
 
     private ZooKeeperDataCache<NamespaceEphemeralData> ownerInfoCache;
-    private ZooKeeperChildrenCache managedLedgerListCache;
+    private ZooKeeperManagedLedgerCache managedLedgerListCache;
     private ResourceQuotaCache resourceQuotaCache;
     private ZooKeeperDataCache<LocalPolicies> policiesCache;
 
@@ -118,7 +116,7 @@ public class LocalZooKeeperCacheService {
             }
         };
 
-        this.managedLedgerListCache = new ZooKeeperChildrenCache(cache, MANAGED_LEDGER_ROOT);
+        this.managedLedgerListCache = new ZooKeeperManagedLedgerCache(cache, MANAGED_LEDGER_ROOT);
         this.resourceQuotaCache = new ResourceQuotaCache(cache);
         this.resourceQuotaCache.initZK();
     }
@@ -147,12 +145,11 @@ public class LocalZooKeeperCacheService {
     }
 
     /**
-     * Create LocalPolicies with bundle-data in LocalZookeeper by fetching it from GlobalZookeeper
+     * Create LocalPolicies with bundle-data in LocalZookeeper by fetching it from GlobalZookeeper.
      *
-     * @param path
-     *            znode path
-     * @param readFromGlobal
-     *            if true copy policies from global zk to local zk else create a new znode with empty {@link Policies}
+     * @param path           znode path
+     * @param readFromGlobal if true copy policies from global zk to local zk else create a new znode with empty {@link
+     *                       Policies}
      * @throws Exception
      */
     @SuppressWarnings("deprecation")
@@ -244,7 +241,7 @@ public class LocalZooKeeperCacheService {
         return this.policiesCache;
     }
 
-    public ZooKeeperChildrenCache managedLedgerListCache() {
+    public ZooKeeperManagedLedgerCache managedLedgerListCache() {
         return this.managedLedgerListCache;
     }
 

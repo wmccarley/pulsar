@@ -22,10 +22,14 @@ import java.lang.annotation.ElementType;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
+import org.apache.pulsar.common.classification.InterfaceAudience;
+import org.apache.pulsar.common.classification.InterfaceStability;
 
 /**
  * Annotation for documenting fields in a config.
  */
+@InterfaceAudience.Public
+@InterfaceStability.Stable
 @Retention(RetentionPolicy.RUNTIME)
 @Target(ElementType.FIELD)
 public @interface FieldDoc {
@@ -46,7 +50,8 @@ public @interface FieldDoc {
 
     /**
      * Return if the field is a sensitive type or not.
-     * usernames/password/accesstokensm etc are some example of sensitive fields
+     * User name, password, access token are some examples of sensitive fields.
+     *
      * @return true if the field is sensitive, otherwise false
      */
     boolean sensitive() default false;

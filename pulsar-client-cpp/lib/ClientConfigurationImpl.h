@@ -25,6 +25,7 @@ namespace pulsar {
 
 struct ClientConfigurationImpl {
     AuthenticationPtr authenticationPtr;
+    uint64_t memoryLimit;
     int ioThreads;
     int operationTimeoutSeconds;
     int messageListenerThreads;
@@ -34,11 +35,14 @@ struct ClientConfigurationImpl {
     std::string tlsTrustCertsFilePath;
     bool tlsAllowInsecureConnection;
     unsigned int statsIntervalInSeconds;
-    LoggerFactoryPtr loggerFactory;
+    std::unique_ptr<LoggerFactory> loggerFactory;
     bool validateHostName;
+    unsigned int partitionsUpdateInterval;
+    std::string listenerName;
 
     ClientConfigurationImpl()
         : authenticationPtr(AuthFactory::Disabled()),
+          memoryLimit(0ull),
           ioThreads(1),
           operationTimeoutSeconds(30),
           messageListenerThreads(1),
@@ -48,7 +52,11 @@ struct ClientConfigurationImpl {
           tlsAllowInsecureConnection(false),
           statsIntervalInSeconds(600),  // 10 minutes
           loggerFactory(),
-          validateHostName(false) {}
+          validateHostName(false),
+          partitionsUpdateInterval(60)  // 1 minute
+    {}
+
+    std::unique_ptr<LoggerFactory> takeLogger() { return std::move(loggerFactory); }
 };
 }  // namespace pulsar
 

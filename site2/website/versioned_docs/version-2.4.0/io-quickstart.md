@@ -26,7 +26,7 @@ At the end of this tutorial, you will be able to:
 
 Before connecting Pulsar to a database, we need to install Pulsar and the desired builtin connector.
 
-For more information about how to install a standalone Pulsar and builtin connectors, see [here](standalone/#installing-pulsar).
+For more information about how to install a standalone Pulsar and builtin connectors, see [here](getting-started-standalone.md/#installing-pulsar).
 
 ## Start a standalone Pulsar 
 
@@ -179,6 +179,10 @@ To learn more about Cassandra Connector, see [Cassandra Connector](io-cassandra.
 Pulsar provides the [CLI](reference-cli-tools.md) for running and managing Pulsar I/O connectors.
 
 We can run following command to sink a sink connector with type `cassandra` and config file `examples/cassandra-sink.yml`.
+
+#### Note
+
+> The `sink-type` parameter of the currently built-in connectors is determined by the setting of the `name` parameter specified in the pulsar-io.yaml file.
 
 ```shell
 bin/pulsar-admin sinks create \

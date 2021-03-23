@@ -32,6 +32,7 @@ public class GoInstanceConfig {
     private int port;
     private String clusterName = "";
     private int killAfterIdleMs;
+    private int expectedHealthCheckInterval;
 
     private String tenant = "";
     private String nameSpace = "";
@@ -40,6 +41,7 @@ public class GoInstanceConfig {
     private String logTopic = "";
     private int processingGuarantees;
     private String secretsMap = "";
+    private String userConfig = "";
     private int runtime;
     private boolean autoAck;
     private int parallelism;
@@ -63,4 +65,6 @@ public class GoInstanceConfig {
 
     private int maxMessageRetries;
     private String deadLetterTopic = "";
+
+    private int metricsPort;
 }

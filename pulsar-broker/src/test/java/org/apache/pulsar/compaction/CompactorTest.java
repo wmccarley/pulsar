@@ -33,7 +33,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Random;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 
@@ -53,6 +52,7 @@ import org.testng.annotations.AfterMethod;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
+@Test(groups = "broker-compaction")
 public class CompactorTest extends MockedPulsarServiceBaseTest {
 
     private ScheduledExecutorService compactionScheduler;
@@ -63,7 +63,7 @@ public class CompactorTest extends MockedPulsarServiceBaseTest {
         super.internalSetup();
 
         admin.clusters().createCluster("use",
-                new ClusterData("http://127.0.0.1:" + BROKER_WEBSERVICE_PORT));
+                new ClusterData(pulsar.getWebServiceAddress()));
         admin.tenants().createTenant("my-property",
                 new TenantInfo(Sets.newHashSet("appid1", "appid2"), Sets.newHashSet("use")));
         admin.namespaces().createNamespace("my-property/use/my-ns");
@@ -72,11 +72,10 @@ public class CompactorTest extends MockedPulsarServiceBaseTest {
                 new ThreadFactoryBuilder().setNameFormat("compactor").setDaemon(true).build());
     }
 
-    @AfterMethod
+    @AfterMethod(alwaysRun = true)
     @Override
     public void cleanup() throws Exception {
         super.internalCleanup();
-
         compactionScheduler.shutdownNow();
     }
 
@@ -207,7 +206,7 @@ public class CompactorTest extends MockedPulsarServiceBaseTest {
         Assert.assertEquals(keyOrder, Lists.newArrayList("c", "b", "a"));
     }
 
-    @Test(expectedExceptions = ExecutionException.class)
+    @Test
     public void testCompactEmptyTopic() throws Exception {
         String topic = "persistent://my-property/use/my-ns/my-topic1";
 

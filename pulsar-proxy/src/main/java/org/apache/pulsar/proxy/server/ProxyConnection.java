@@ -23,9 +23,11 @@ import static com.google.common.base.Preconditions.checkArgument;
 import java.net.SocketAddress;
 import java.util.concurrent.TimeUnit;
 
+import java.util.function.Supplier;
 import javax.naming.AuthenticationException;
 import javax.net.ssl.SSLSession;
 
+import io.netty.handler.codec.haproxy.HAProxyMessage;
 import org.apache.pulsar.broker.authentication.AuthenticationDataSource;
 import org.apache.pulsar.broker.authentication.AuthenticationProvider;
 import org.apache.pulsar.broker.authentication.AuthenticationState;
@@ -41,24 +43,24 @@ import org.apache.pulsar.client.impl.conf.ClientConfigurationData;
 import org.apache.pulsar.common.api.AuthData;
 import org.apache.pulsar.common.protocol.Commands;
 import org.apache.pulsar.common.protocol.PulsarHandler;
-import org.apache.pulsar.common.api.proto.PulsarApi;
-import org.apache.pulsar.common.api.proto.PulsarApi.CommandAuthResponse;
-import org.apache.pulsar.common.api.proto.PulsarApi.CommandConnect;
-import org.apache.pulsar.common.api.proto.PulsarApi.CommandGetTopicsOfNamespace;
-import org.apache.pulsar.common.api.proto.PulsarApi.CommandLookupTopic;
-import org.apache.pulsar.common.api.proto.PulsarApi.CommandGetSchema;
-import org.apache.pulsar.common.api.proto.PulsarApi.CommandPartitionedTopicMetadata;
-import org.apache.pulsar.common.api.proto.PulsarApi.ServerError;
+import org.apache.pulsar.common.api.proto.CommandAuthResponse;
+import org.apache.pulsar.common.api.proto.CommandConnect;
+import org.apache.pulsar.common.api.proto.CommandGetTopicsOfNamespace;
+import org.apache.pulsar.common.api.proto.CommandLookupTopic;
+import org.apache.pulsar.common.api.proto.CommandGetSchema;
+import org.apache.pulsar.common.api.proto.CommandPartitionedTopicMetadata;
+import org.apache.pulsar.common.api.proto.ProtocolVersion;
+import org.apache.pulsar.common.api.proto.ServerError;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
-import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslHandler;
 import io.netty.util.concurrent.Future;
 import io.netty.util.concurrent.FutureListener;
+import lombok.Getter;
 
 /**
  * Handles incoming discovery request from client and sends appropriate response back to client
@@ -71,9 +73,10 @@ public class ProxyConnection extends PulsarHandler implements FutureListener<Voi
     private Authentication clientAuthentication;
     AuthenticationDataSource authenticationData;
     private State state;
-    private final SslContext sslCtx;
+    private final Supplier<SslHandler> sslHandlerSupplier;
 
     private LookupProxyHandler lookupProxyHandler = null;
+    @Getter
     private DirectProxyHandler directProxyHandler = null;
     String clientAuthRole;
     AuthData clientAuthData;
@@ -86,6 +89,7 @@ public class ProxyConnection extends PulsarHandler implements FutureListener<Voi
     private boolean hasProxyToBrokerUrl;
     private int protocolVersionToAdvertise;
     private String proxyToBrokerUrl;
+    private HAProxyMessage haProxyMessage;
 
     enum State {
         Init,
@@ -110,11 +114,11 @@ public class ProxyConnection extends PulsarHandler implements FutureListener<Voi
         return client.getCnxPool();
     }
 
-    public ProxyConnection(ProxyService proxyService, SslContext sslCtx) {
+    public ProxyConnection(ProxyService proxyService, Supplier<SslHandler> sslHandlerSupplier) {
         super(30, TimeUnit.SECONDS);
         this.service = proxyService;
         this.state = State.Init;
-        this.sslCtx = sslCtx;
+        this.sslHandlerSupplier = sslHandlerSupplier;
     }
 
     @Override
@@ -138,6 +142,7 @@ public class ProxyConnection extends PulsarHandler implements FutureListener<Voi
     public void channelActive(ChannelHandlerContext ctx) throws Exception {
         super.channelActive(ctx);
         ProxyService.newConnections.inc();
+        service.getClientCnxs().add(this);
         LOG.info("[{}] New connection opened", remoteAddress);
     }
 
@@ -152,20 +157,24 @@ public class ProxyConnection extends PulsarHandler implements FutureListener<Voi
         if (client != null) {
             client.close();
         }
-
+        service.getClientCnxs().remove(this);
         LOG.info("[{}] Connection closed", remoteAddress);
     }
 
     @Override
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
         super.exceptionCaught(ctx, cause);
-        LOG.warn("[{}] Got exception {} : {}", remoteAddress, cause.getClass().getSimpleName(), cause.getMessage(),
+        LOG.warn("[{}] Got exception {} : {} {}", remoteAddress, cause.getClass().getSimpleName(), cause.getMessage(),
                 ClientCnx.isKnownException(cause) ? null : cause);
         ctx.close();
     }
 
     @Override
     public void channelRead(final ChannelHandlerContext ctx, Object msg) throws Exception {
+        if (msg instanceof HAProxyMessage) {
+            haProxyMessage = (HAProxyMessage) msg;
+            return;
+        }
         switch (state) {
         case Init:
         case Connecting:
@@ -179,7 +188,9 @@ public class ProxyConnection extends PulsarHandler implements FutureListener<Voi
             // only if we can write on the connection
             ProxyService.opsCounter.inc();
             if (msg instanceof ByteBuf) {
-                ProxyService.bytesCounter.inc(((ByteBuf) msg).readableBytes());
+                int bytes = ((ByteBuf) msg).readableBytes();
+                directProxyHandler.getInboundChannelRequestsRate().recordEvent(bytes);
+                ProxyService.bytesCounter.inc(bytes);
             }
             directProxyHandler.outboundChannel.writeAndFlush(msg).addListener(this);
             break;
@@ -209,7 +220,7 @@ public class ProxyConnection extends PulsarHandler implements FutureListener<Voi
             // connection there and just pass bytes in both directions
             state = State.ProxyConnectionToBroker;
             directProxyHandler = new DirectProxyHandler(service, this, proxyToBrokerUrl,
-                protocolVersionToAdvertise, sslCtx);
+                protocolVersionToAdvertise, sslHandlerSupplier);
             cancelKeepAliveTask();
         } else {
             // Client is doing a lookup, we can consider the handshake complete
@@ -259,7 +270,7 @@ public class ProxyConnection extends PulsarHandler implements FutureListener<Voi
     @Override
     protected void handleConnect(CommandConnect connect) {
         checkArgument(state == State.Init);
-        this.remoteEndpointProtocolVersion = connect.getProtocolVersion();
+        this.setRemoteEndpointProtocolVersion(connect.getProtocolVersion());
         this.hasProxyToBrokerUrl = connect.hasProxyToBrokerUrl();
         this.protocolVersionToAdvertise = getProtocolVersionToAdvertise(connect);
         this.proxyToBrokerUrl = connect.hasProxyToBrokerUrl() ? connect.getProxyToBrokerUrl() : "null";
@@ -268,11 +279,11 @@ public class ProxyConnection extends PulsarHandler implements FutureListener<Voi
             LOG.debug("Received CONNECT from {} proxyToBroker={}", remoteAddress, proxyToBrokerUrl);
             LOG.debug(
                 "[{}] Protocol version to advertise to broker is {}, clientProtocolVersion={}, proxyProtocolVersion={}",
-                remoteAddress, protocolVersionToAdvertise, remoteEndpointProtocolVersion,
+                remoteAddress, protocolVersionToAdvertise, getRemoteEndpointProtocolVersion(),
                 Commands.getCurrentProtocolVersion());
         }
 
-        if (remoteEndpointProtocolVersion < PulsarApi.ProtocolVersion.v10_VALUE) {
+        if (getRemoteEndpointProtocolVersion() < ProtocolVersion.v10.getValue()) {
             LOG.warn("[{}] Client doesn't support connecting through proxy", remoteAddress);
             ctx.close();
             return;
@@ -294,7 +305,7 @@ public class ProxyConnection extends PulsarHandler implements FutureListener<Voi
                 return;
             }
 
-            AuthData clientData = AuthData.of(connect.getAuthData().toByteArray());
+            AuthData clientData = AuthData.of(connect.getAuthData());
             if (connect.hasAuthMethodName()) {
                 authMethod = connect.getAuthMethodName();
             } else if (connect.hasAuthMethod()) {
@@ -327,6 +338,7 @@ public class ProxyConnection extends PulsarHandler implements FutureListener<Voi
             }
 
             authState = authenticationProvider.newAuthState(clientData, remoteAddress, sslSession);
+            authenticationData = authState.getAuthDataSource();
             doAuthentication(clientData);
         } catch (Exception e) {
             LOG.warn("[{}] Unable to authenticate: ", remoteAddress, e);
@@ -348,7 +360,7 @@ public class ProxyConnection extends PulsarHandler implements FutureListener<Voi
         }
 
         try {
-            AuthData clientData = AuthData.of(authResponse.getResponse().getAuthData().toByteArray());
+            AuthData clientData = AuthData.of(authResponse.getResponse().getAuthData());
             doAuthentication(clientData);
         } catch (Exception e) {
             String msg = "Unable to handleAuthResponse";
@@ -407,8 +419,15 @@ public class ProxyConnection extends PulsarHandler implements FutureListener<Voi
         }
         if (proxyConfig.isTlsEnabledWithBroker()) {
             clientConf.setUseTls(true);
-            clientConf.setTlsTrustCertsFilePath(proxyConfig.getBrokerClientTrustCertsFilePath());
-            clientConf.setTlsAllowInsecureConnection(proxyConfig.isTlsAllowInsecureConnection());
+            if (proxyConfig.isBrokerClientTlsEnabledWithKeyStore()) {
+                clientConf.setUseKeyStoreTls(true);
+                clientConf.setTlsTrustStoreType(proxyConfig.getBrokerClientTlsTrustStoreType());
+                clientConf.setTlsTrustStorePath(proxyConfig.getBrokerClientTlsTrustStore());
+                clientConf.setTlsTrustStorePassword(proxyConfig.getBrokerClientTlsTrustStorePassword());
+            } else {
+                clientConf.setTlsTrustCertsFilePath(proxyConfig.getBrokerClientTrustCertsFilePath());
+                clientConf.setTlsAllowInsecureConnection(proxyConfig.isTlsAllowInsecureConnection());
+            }
         }
         return clientConf;
     }
@@ -443,6 +462,14 @@ public class ProxyConnection extends PulsarHandler implements FutureListener<Voi
 
     ChannelHandlerContext ctx() {
         return ctx;
+    }
+
+    public boolean hasHAProxyMessage() {
+        return haProxyMessage != null;
+    }
+
+    public HAProxyMessage getHAProxyMessage() {
+        return haProxyMessage;
     }
 
     private static final Logger LOG = LoggerFactory.getLogger(ProxyConnection.class);

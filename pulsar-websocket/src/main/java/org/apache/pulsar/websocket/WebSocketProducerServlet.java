@@ -27,7 +27,7 @@ public class WebSocketProducerServlet extends WebSocketServlet {
     public static final String SERVLET_PATH = "/ws/producer";
     public static final String SERVLET_PATH_V2 = "/ws/v2/producer";
 
-    private final WebSocketService service;
+    private final transient WebSocketService service;
 
     public WebSocketProducerServlet(WebSocketService service) {
         this.service = service;
@@ -35,7 +35,7 @@ public class WebSocketProducerServlet extends WebSocketServlet {
 
     @Override
     public void configure(WebSocketServletFactory factory) {
-        factory.getPolicy().setMaxTextMessageSize(WebSocketService.MaxTextFrameSize);
+        factory.getPolicy().setMaxTextMessageSize(service.getConfig().getWebSocketMaxTextFrameSize());
         if (service.getConfig().getWebSocketSessionIdleTimeoutMillis() > 0) {
             factory.getPolicy().setIdleTimeout(service.getConfig().getWebSocketSessionIdleTimeoutMillis());
         }

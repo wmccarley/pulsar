@@ -19,14 +19,16 @@
 package org.apache.pulsar.common.policies.data;
 
 import static com.google.common.base.Preconditions.checkNotNull;
-
 import java.util.Map;
+import org.apache.pulsar.client.api.ProducerAccessMode;
 
 /**
  * Statistics about a publisher.
  */
 public class PublisherStats {
     private int count;
+
+    public ProducerAccessMode accessMode;
 
     /** Total rate of messages published by this publisher (msg/s). */
     public double msgRateIn;
@@ -36,6 +38,9 @@ public class PublisherStats {
 
     /** Average message size published by this publisher. */
     public double averageMsgSize;
+
+    /** total chunked message count received. **/
+    public double chunkedMessageRate;
 
     /** Id of this publisher. */
     public long producerId;

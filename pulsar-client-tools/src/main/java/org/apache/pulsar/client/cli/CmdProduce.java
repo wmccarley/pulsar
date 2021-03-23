@@ -18,6 +18,8 @@
  */
 package org.apache.pulsar.client.cli;
 
+import static org.apache.commons.lang3.StringUtils.isNotBlank;
+
 import com.beust.jcommander.Parameter;
 import com.beust.jcommander.ParameterException;
 import com.beust.jcommander.Parameters;
@@ -33,6 +35,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -44,8 +47,10 @@ import org.apache.pulsar.client.api.Authentication;
 import org.apache.pulsar.client.api.AuthenticationDataProvider;
 import org.apache.pulsar.client.api.ClientBuilder;
 import org.apache.pulsar.client.api.Producer;
+import org.apache.pulsar.client.api.ProducerBuilder;
 import org.apache.pulsar.client.api.PulsarClient;
 import org.apache.pulsar.client.api.PulsarClientException;
+import org.apache.pulsar.client.api.TypedMessageBuilder;
 import org.apache.pulsar.common.naming.TopicName;
 import org.apache.pulsar.common.util.ObjectMapperFactory;
 import org.apache.pulsar.websocket.data.ProducerMessage;
@@ -92,10 +97,29 @@ public class CmdProduce {
                description = "Rate (in msg/sec) at which to produce," +
                        " value 0 means to produce messages as fast as possible.")
     private double publishRate = 0;
+    
+    @Parameter(names = { "-c",
+            "--chunking" }, description = "Should split the message and publish in chunks if message size is larger than allowed max size")
+    private boolean chunkingAllowed = false;
 
     @Parameter(names = { "-s", "--separator" },
                description = "Character to split messages string on default is comma")
     private String separator = ",";
+
+    @Parameter(names = { "-p", "--properties"}, description = "Properties to add, Comma separated "
+            + "key=value string, like k1=v1,k2=v2.")
+    private List<String> properties = Lists.newArrayList();
+
+    @Parameter(names = { "-k", "--key"}, description = "message key to add ")
+    private String key;
+
+    @Parameter(names = { "-ekn", "--encryption-key-name" }, description = "The public key name to encrypt payload")
+    private String encKeyName = null;
+
+    @Parameter(names = { "-ekv",
+            "--encryption-key-value" }, description = "The URI of public key to encrypt payload, for example "
+                    + "file:///path/to/public.key or data:application/x-pem-file;base64,*****")
+    private String encKeyValue = null;
 
     private ClientBuilder clientBuilder;
     private Authentication authentication;
@@ -187,17 +211,44 @@ public class CmdProduce {
 
         try {
             PulsarClient client = clientBuilder.build();
-            Producer<byte[]> producer = client.newProducer().topic(topic).create();
+            ProducerBuilder<byte[]> producerBuilder = client.newProducer().topic(topic);
+            if (this.chunkingAllowed) {
+                producerBuilder.enableChunking(true);
+                producerBuilder.enableBatching(false);
+            }
+            if (isNotBlank(this.encKeyName) && isNotBlank(this.encKeyValue)) {
+                producerBuilder.addEncryptionKey(this.encKeyName);
+                producerBuilder.defaultCryptoKeyReader(this.encKeyValue);
+            }
+            Producer<byte[]> producer = producerBuilder.create();
 
             List<byte[]> messageBodies = generateMessageBodies(this.messages, this.messageFileNames);
             RateLimiter limiter = (this.publishRate > 0) ? RateLimiter.create(this.publishRate) : null;
+
+            Map<String, String> kvMap = new HashMap<>();
+            for (String property : properties) {
+                String [] kv = property.split("=");
+                kvMap.put(kv[0], kv[1]);
+            }
+
             for (int i = 0; i < this.numTimesProduce; i++) {
                 for (byte[] content : messageBodies) {
                     if (limiter != null) {
                         limiter.acquire();
                     }
 
-                    producer.send(content);
+                    TypedMessageBuilder<byte[]> message = producer.newMessage();
+
+                    if (!kvMap.isEmpty()) {
+                        message.properties(kvMap);
+                    }
+
+                    if (key != null && !key.isEmpty()) {
+                        message.key(key);
+                    }
+
+                    message.value(content).send();
+
                     numMessagesSent++;
                 }
             }

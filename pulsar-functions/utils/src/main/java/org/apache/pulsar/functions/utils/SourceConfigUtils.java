@@ -25,22 +25,28 @@ import com.google.gson.reflect.TypeToken;
 import lombok.AllArgsConstructor;
 import lombok.Getter;
 import lombok.Setter;
+import lombok.SneakyThrows;
 import lombok.extern.slf4j.Slf4j;
+import net.jodah.typetools.TypeResolver;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.pulsar.common.functions.Resources;
+import org.apache.pulsar.common.io.BatchSourceConfig;
+import org.apache.pulsar.common.io.ConnectorDefinition;
 import org.apache.pulsar.common.io.SourceConfig;
+import org.apache.pulsar.common.naming.TopicDomain;
 import org.apache.pulsar.common.naming.TopicName;
 import org.apache.pulsar.common.nar.NarClassLoader;
 import org.apache.pulsar.common.util.ObjectMapperFactory;
+import org.apache.pulsar.config.validation.ConfigValidation;
 import org.apache.pulsar.functions.api.utils.IdentityFunction;
 import org.apache.pulsar.functions.proto.Function;
 import org.apache.pulsar.functions.proto.Function.FunctionDetails;
 import org.apache.pulsar.functions.utils.io.ConnectorUtils;
+import org.apache.pulsar.io.core.BatchSource;
+import org.apache.pulsar.io.core.Source;
 
-import java.io.File;
 import java.io.IOException;
 import java.lang.reflect.Type;
-import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -98,9 +104,20 @@ public class SourceConfigUtils {
             sourceSpecBuilder.setBuiltin(builtin);
         }
 
+        Map<String, Object> configs = new HashMap<>();
         if (sourceConfig.getConfigs() != null) {
-            sourceSpecBuilder.setConfigs(new Gson().toJson(sourceConfig.getConfigs()));
+            configs.putAll(sourceConfig.getConfigs());
         }
+
+        // Batch source handling
+        if (sourceConfig.getBatchSourceConfig() != null) {
+            configs.put(BatchSourceConfig.BATCHSOURCE_CONFIG_KEY, new Gson().toJson(sourceConfig.getBatchSourceConfig()));
+            configs.put(BatchSourceConfig.BATCHSOURCE_CLASSNAME_KEY, sourceSpecBuilder.getClassName());
+            sourceSpecBuilder.setClassName("org.apache.pulsar.functions.source.batch.BatchSourceExecutor");
+        }
+
+        sourceSpecBuilder.setConfigs(new Gson().toJson(configs));
+
 
         if (sourceConfig.getSecrets() != null && !sourceConfig.getSecrets().isEmpty()) {
             functionDetailsBuilder.setSecretsMap(new Gson().toJson(sourceConfig.getSecrets()));
@@ -126,6 +143,12 @@ public class SourceConfigUtils {
         if (sourceDetails.getTypeArg() != null) {
             sinkSpecBuilder.setTypeClassName(sourceDetails.getTypeArg());
         }
+
+        if (sourceConfig.getProducerConfig() != null) {
+            sinkSpecBuilder.setProducerSpec(ProducerConfigUtils.convert(sourceConfig.getProducerConfig()));
+        }
+
+        sinkSpecBuilder.setForwardSourceMessageProperty(true);
 
         functionDetailsBuilder.setSink(sinkSpecBuilder);
 
@@ -165,16 +188,22 @@ public class SourceConfigUtils {
         if (!StringUtils.isEmpty(sourceSpec.getBuiltin())) {
             sourceConfig.setArchive("builtin://" + sourceSpec.getBuiltin());
         }
-        if (!StringUtils.isEmpty(sourceSpec.getConfigs())) {
-            TypeReference<HashMap<String,Object>> typeRef
-                    = new TypeReference<HashMap<String,Object>>() {};
-            Map<String, Object> configMap;
-            try {
-                configMap = ObjectMapperFactory.getThreadLocal().readValue(sourceSpec.getConfigs(), typeRef);
-            } catch (IOException e) {
-                log.error("Failed to read configs for source {}", FunctionCommon.getFullyQualifiedName(functionDetails), e);
-                throw new RuntimeException(e);
+        Map<String, Object> configMap = extractSourceConfig(sourceSpec, FunctionCommon.getFullyQualifiedName(functionDetails));
+        if (configMap != null) {
+            BatchSourceConfig batchSourceConfig = extractBatchSourceConfig(configMap);
+            if (batchSourceConfig != null) {
+                sourceConfig.setBatchSourceConfig(batchSourceConfig);
+                if (configMap.containsKey(BatchSourceConfig.BATCHSOURCE_CLASSNAME_KEY)) {
+                    if (!StringUtils.isEmpty((String)configMap.get(BatchSourceConfig.BATCHSOURCE_CLASSNAME_KEY))) {
+                        sourceConfig.setClassName((String)configMap.get(BatchSourceConfig.BATCHSOURCE_CLASSNAME_KEY));
+                    } else {
+                        sourceConfig.setClassName(null);
+                    }
+                }
             }
+
+            configMap.remove(BatchSourceConfig.BATCHSOURCE_CONFIG_KEY);
+            configMap.remove(BatchSourceConfig.BATCHSOURCE_CLASSNAME_KEY);
             sourceConfig.setConfigs(configMap);
         }
         if (!isEmpty(functionDetails.getSecretsMap())) {
@@ -189,6 +218,9 @@ public class SourceConfigUtils {
         }
         if (!StringUtils.isEmpty(sinkSpec.getSerDeClassName())) {
             sourceConfig.setSerdeClassName(sinkSpec.getSerDeClassName());
+        }
+        if (sinkSpec.getProducerSpec() != null) {
+            sourceConfig.setProducerConfig(ProducerConfigUtils.convertFromSpec(sinkSpec.getProducerSpec()));
         }
         if (functionDetails.hasResources()) {
             Resources resources = new Resources();
@@ -209,7 +241,9 @@ public class SourceConfigUtils {
         return sourceConfig;
     }
 
-    public static ExtractedSourceDetails validate(SourceConfig sourceConfig, Path archivePath, File sourcePackageFile) {
+    public static ExtractedSourceDetails validateAndExtractDetails(SourceConfig sourceConfig,
+                                                                   ClassLoader sourceClassLoader,
+                                                                   boolean validateConnectorConfig) {
         if (isEmpty(sourceConfig.getTenant())) {
             throw new IllegalArgumentException("Source tenant cannot be null");
         }
@@ -231,95 +265,45 @@ public class SourceConfigUtils {
         if (sourceConfig.getResources() != null) {
             ResourceConfigUtils.validate(sourceConfig.getResources());
         }
-        if (archivePath == null && sourcePackageFile == null) {
-            throw new IllegalArgumentException("Source package is not provided");
-        }
 
-        Class<?> typeArg;
-        ClassLoader classLoader;
         String sourceClassName = sourceConfig.getClassName();
-        ClassLoader jarClassLoader = null;
-        ClassLoader narClassLoader = null;
-
-        Exception jarClassLoaderException = null;
-        Exception narClassLoaderException = null;
-
-        try {
-            jarClassLoader = FunctionCommon.extractClassLoader(archivePath, sourcePackageFile);
-        } catch (Exception e) {
-            jarClassLoaderException = e;
-        }
-        try {
-            narClassLoader = FunctionCommon.extractNarClassLoader(archivePath, sourcePackageFile);
-        } catch (Exception e) {
-            narClassLoaderException = e;
-        }
-
-        // if source class name is not provided, we can only try to load archive as a NAR
-        if (isEmpty(sourceClassName)) {
-            if (narClassLoader == null) {
-                throw new IllegalArgumentException("Source package does not have the correct format. " +
-                        "Pulsar cannot determine if the package is a NAR package or JAR package." +
-                        "Source classname is not provided and attempts to load it as a NAR package produced the following error.",
-                        narClassLoaderException);
-            }
+        // if class name in source config is not set, this should be a built-in source
+        // thus we should try to find it class name in the NAR service definition
+        if (sourceClassName == null) {
             try {
-                sourceClassName = ConnectorUtils.getIOSourceClass((NarClassLoader) narClassLoader);
+                sourceClassName = ConnectorUtils.getIOSourceClass((NarClassLoader) sourceClassLoader);
             } catch (IOException e) {
                 throw new IllegalArgumentException("Failed to extract source class from archive", e);
             }
-            try {
-                typeArg = getSourceType(sourceClassName, narClassLoader);
-                classLoader = narClassLoader;
-            } catch (ClassNotFoundException e) {
-                throw new IllegalArgumentException(
-                        String.format("Source class %s must be in class path", sourceClassName), e);
-            }
+        }
 
-        } else {
-            // if source class name is provided, we need to try to load it as a JAR and as a NAR.
-            if (jarClassLoader != null) {
-                try {
-                    typeArg = getSourceType(sourceClassName, jarClassLoader);
-                    classLoader = jarClassLoader;
-                } catch (ClassNotFoundException e) {
-                    // class not found in JAR try loading as a NAR and searching for the class
-                    if (narClassLoader != null) {
-                        try {
-                            typeArg = getSourceType(sourceClassName, narClassLoader);
-                            classLoader = narClassLoader;
-                        } catch (ClassNotFoundException e1) {
-                            throw new IllegalArgumentException(
-                                    String.format("Source class %s must be in class path", sourceClassName), e1);
-                        }
-                    } else {
-                        throw new IllegalArgumentException(
-                                String.format("Source class %s must be in class path", sourceClassName), e);
-                    }
-                }
-            } else if (narClassLoader != null) {
-                try {
-                    typeArg = getSourceType(sourceClassName, narClassLoader);
-                    classLoader = narClassLoader;
-                } catch (ClassNotFoundException e1) {
-                    throw new IllegalArgumentException(
-                            String.format("Source class %s must be in class path", sourceClassName), e1);
-                }
+        // check if source implements the correct interfaces
+        Class sourceClass;
+        try {
+            sourceClass = sourceClassLoader.loadClass(sourceClassName);
+        } catch (ClassNotFoundException e) {
+            throw new IllegalArgumentException(
+              String.format("Source class %s not found in class loader", sourceClassName, e));
+        }
+
+        if (!Source.class.isAssignableFrom(sourceClass) && !BatchSource.class.isAssignableFrom(sourceClass)) {
+            throw new IllegalArgumentException(
+              String.format("Source class %s does not implement the correct interface",
+                sourceClass.getName()));
+        }
+
+        if (BatchSource.class.isAssignableFrom(sourceClass)) {
+            if (sourceConfig.getBatchSourceConfig() != null) {
+                validateBatchSourceConfig(sourceConfig.getBatchSourceConfig());
             } else {
-                StringBuilder errorMsg = new StringBuilder("Source package does not have the correct format." +
-                        " Pulsar cannot determine if the package is a NAR package or JAR package.");
-
-                if (jarClassLoaderException != null) {
-                    errorMsg.append("Attempts to load it as a JAR package produced error: " + jarClassLoaderException.getMessage());
-                }
-
-                if (narClassLoaderException != null) {
-                    errorMsg.append("Attempts to load it as a NAR package produced error: " + narClassLoaderException.getMessage());
-                }
-
-                throw new IllegalArgumentException(errorMsg.toString());
+                throw new IllegalArgumentException(
+                  String.format("Source class %s implements %s but batch source source config is not specified",
+                    sourceClass.getName(), BatchSource.class.getName()));
             }
         }
+
+        // extract type from source class
+        Class<?> typeArg = getSourceType(sourceClass);
 
         // Only one of serdeClassName or schemaType should be set
         if (!StringUtils.isEmpty(sourceConfig.getSerdeClassName()) && !StringUtils.isEmpty(sourceConfig.getSchemaType())) {
@@ -327,17 +311,37 @@ public class SourceConfigUtils {
         }
 
         if (!StringUtils.isEmpty(sourceConfig.getSerdeClassName())) {
-            ValidatorUtils.validateSerde(sourceConfig.getSerdeClassName(), typeArg, classLoader, false);
+            ValidatorUtils.validateSerde(sourceConfig.getSerdeClassName(), typeArg, sourceClassLoader, false);
         }
         if (!StringUtils.isEmpty(sourceConfig.getSchemaType())) {
-            ValidatorUtils.validateSchema(sourceConfig.getSchemaType(), typeArg, classLoader, false);
+            ValidatorUtils.validateSchema(sourceConfig.getSchemaType(), typeArg, sourceClassLoader, false);
+        }
+
+        if (sourceConfig.getProducerConfig() != null && sourceConfig.getProducerConfig().getCryptoConfig() != null) {
+            ValidatorUtils.validateCryptoKeyReader(sourceConfig.getProducerConfig().getCryptoConfig(), sourceClassLoader, true);
+        }
+
+        if (typeArg.equals(TypeResolver.Unknown.class)) {
+            throw new IllegalArgumentException(
+              String.format("Failed to resolve type for Source class %s", sourceClassName));
+        }
+
+        // validate user defined config if enabled and source is loaded from NAR
+        if (validateConnectorConfig && sourceClassLoader instanceof NarClassLoader) {
+            validateSourceConfig(sourceConfig, (NarClassLoader) sourceClassLoader);
         }
 
         return new ExtractedSourceDetails(sourceClassName, typeArg.getName());
     }
 
+    @SneakyThrows
+    public static SourceConfig clone(SourceConfig sourceConfig) {
+        return ObjectMapperFactory.getThreadLocal().readValue(
+                ObjectMapperFactory.getThreadLocal().writeValueAsBytes(sourceConfig), SourceConfig.class);
+    }
+
     public static SourceConfig validateUpdate(SourceConfig existingConfig, SourceConfig newConfig) {
-        SourceConfig mergedConfig = existingConfig.toBuilder().build();
+        SourceConfig mergedConfig = clone(existingConfig);
         if (!existingConfig.getTenant().equals(newConfig.getTenant())) {
             throw new IllegalArgumentException("Tenants differ");
         }
@@ -366,7 +370,7 @@ public class SourceConfigUtils {
             mergedConfig.setSecrets(newConfig.getSecrets());
         }
         if (newConfig.getProcessingGuarantees() != null && !newConfig.getProcessingGuarantees().equals(existingConfig.getProcessingGuarantees())) {
-            throw new IllegalArgumentException("Processing Guarantess cannot be altered");
+            throw new IllegalArgumentException("Processing Guarantees cannot be altered");
         }
         if (newConfig.getParallelism() != null) {
             mergedConfig.setParallelism(newConfig.getParallelism());
@@ -383,7 +387,102 @@ public class SourceConfigUtils {
         if (!StringUtils.isEmpty(newConfig.getCustomRuntimeOptions())) {
             mergedConfig.setCustomRuntimeOptions(newConfig.getCustomRuntimeOptions());
         }
+        if (isBatchSource(existingConfig) != isBatchSource(newConfig)) {
+            throw new IllegalArgumentException("Sources cannot be update between regular sources and batchsource");
+        }
+        if (newConfig.getBatchSourceConfig() != null) {
+            validateBatchSourceConfigUpdate(existingConfig.getBatchSourceConfig(), newConfig.getBatchSourceConfig());
+            mergedConfig.setBatchSourceConfig(newConfig.getBatchSourceConfig());
+        }
         return mergedConfig;
     }
 
+    public static void validateBatchSourceConfig(BatchSourceConfig batchSourceConfig) throws IllegalArgumentException {
+        if (isEmpty(batchSourceConfig.getDiscoveryTriggererClassName())) {
+            log.error("BatchSourceConfig does not specify Discovery Trigger ClassName");
+            throw new IllegalArgumentException("BatchSourceConfig does not specify Discovery Trigger ClassName");
+        }
+    }
+
+    public static Map<String, Object> extractSourceConfig(Function.SourceSpec sourceSpec, String fqfn) {
+        if (!StringUtils.isEmpty(sourceSpec.getConfigs())) {
+            TypeReference<HashMap<String, Object>> typeRef
+                    = new TypeReference<HashMap<String, Object>>() {
+            };
+            try {
+                return ObjectMapperFactory.getThreadLocal().readValue(sourceSpec.getConfigs(), typeRef);
+            } catch (IOException e) {
+                log.error("Failed to read configs for source {}", fqfn, e);
+                throw new RuntimeException(e);
+            }
+        } else {
+            return null;
+        }
+    }
+
+    public static BatchSourceConfig extractBatchSourceConfig(Map<String, Object> configMap) {
+        if (configMap.containsKey(BatchSourceConfig.BATCHSOURCE_CONFIG_KEY)) {
+            String batchSourceConfigJson = (String) configMap.get(BatchSourceConfig.BATCHSOURCE_CONFIG_KEY);
+            return new Gson().fromJson(batchSourceConfigJson, BatchSourceConfig.class);
+        } else {
+            return null;
+        }
+    }
+
+    public static Map<String, String> computeBatchSourceIntermediateTopicSubscriptions(Function.FunctionDetails details,
+                                                                                       String fqfn) {
+        Map<String, Object> configMap = extractSourceConfig(details.getSource(), fqfn);
+        if (configMap != null) {
+            BatchSourceConfig batchSourceConfig = extractBatchSourceConfig(configMap);
+            String intermediateTopicName = computeBatchSourceIntermediateTopicName(details.getTenant(),
+                    details.getNamespace(), details.getName()).toString();
+            if (batchSourceConfig != null) {
+                Map<String, String> subscriptionMap = new HashMap<>();
+                subscriptionMap.put(intermediateTopicName,
+                            computeBatchSourceInstanceSubscriptionName(details.getTenant(),
+                                    details.getNamespace(), details.getName()));
+                return subscriptionMap;
+            }
+        }
+        return null;
+    }
+
+    public static String computeBatchSourceInstanceSubscriptionName(String tenant, String namespace,
+                                                                    String sourceName) {
+        return "BatchSourceExecutor-" + tenant + "/" + namespace + "/" + sourceName;
+    }
+
+    public static TopicName computeBatchSourceIntermediateTopicName(String tenant, String namespace,
+                                                                    String sourceName) {
+        return TopicName.get(TopicDomain.persistent.name(), tenant, namespace, sourceName + "-intermediate");
+    }
+
+    public static boolean isBatchSource(SourceConfig sourceConfig) {
+        return sourceConfig.getBatchSourceConfig() != null;
+    }
+
+    public static void validateBatchSourceConfigUpdate(BatchSourceConfig existingConfig, BatchSourceConfig newConfig) {
+        if (!existingConfig.getDiscoveryTriggererClassName().equals(newConfig.getDiscoveryTriggererClassName())) {
+            throw new IllegalArgumentException("DiscoverTriggerer class cannot be updated for batchsources");
+        }
+    }
+
+    public static void validateSourceConfig(SourceConfig sourceConfig, NarClassLoader narClassLoader) {
+        try {
+            ConnectorDefinition defn = ConnectorUtils.getConnectorDefinition(narClassLoader);
+            if (defn.getSourceConfigClass() != null) {
+                Class configClass = Class.forName(defn.getSourceConfigClass(), true, narClassLoader);
+                Object configObject = ObjectMapperFactory.getThreadLocal().convertValue(sourceConfig.getConfigs(), configClass);
+                if (configObject != null) {
+                    ConfigValidation.validateConfig(configObject);
+                }
+            }
+        } catch (IOException e) {
+            throw new IllegalArgumentException("Error validating source config", e);
+        } catch (ClassNotFoundException e) {
+            throw new IllegalArgumentException("Could not find source config class");
+        } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException("Could not validate source config: " + e.getMessage());
+        }
+    }
 }

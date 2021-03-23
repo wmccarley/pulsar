@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements.  See the NOTICE file
@@ -40,5 +40,10 @@ for line in "${PYTHON_VERSIONS[@]}"; do
 
     echo "Using image: $IMAGE_NAME"
 
-    docker run -i -v $PWD:/pulsar $IMAGE_NAME /build-client-lib-within-docker.sh
+    VOLUME_OPTION=${VOLUME_OPTION:-"-v $ROOT_DIR:/pulsar"}
+    COMMAND="/pulsar/pulsar-client-cpp/docker/build-client-lib-within-docker.sh"
+    DOCKER_CMD="docker run -i ${VOLUME_OPTION} ${IMAGE_NAME}"
+
+    $DOCKER_CMD bash -c "${COMMAND}"
+
 done

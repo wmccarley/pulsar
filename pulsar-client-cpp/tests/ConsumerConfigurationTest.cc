@@ -18,8 +18,6 @@
  */
 #include <pulsar/Client.h>
 #include <gtest/gtest.h>
-#include <boost/date_time/posix_time/ptime.hpp>
-#include <boost/bind.hpp>
 #include <lib/LogUtils.h>
 
 DECLARE_LOG_OBJECT()
@@ -172,4 +170,17 @@ TEST(ConsumerConfigurationTest, testSubscriptionInitialPosition) {
     ASSERT_EQ(ResultAlreadyClosed, consumer.close());
     ASSERT_EQ(ResultOk, producer.close());
     ASSERT_EQ(ResultOk, client.close());
+}
+
+TEST(ConsumerConfigurationTest, testResetAckTimeOut) {
+    Result result;
+
+    uint64_t milliSeconds = 50000;
+    ConsumerConfiguration config;
+    config.setUnAckedMessagesTimeoutMs(milliSeconds);
+    ASSERT_EQ(milliSeconds, config.getUnAckedMessagesTimeoutMs());
+
+    // should be able to set it back to 0.
+    config.setUnAckedMessagesTimeoutMs(0);
+    ASSERT_EQ(0, config.getUnAckedMessagesTimeoutMs());
 }

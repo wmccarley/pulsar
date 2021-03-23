@@ -21,7 +21,7 @@ package org.apache.pulsar.io.kafka;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
-import lombok.*;
+import lombok.Data;
 import lombok.experimental.Accessors;
 
 import java.io.File;
@@ -31,10 +31,6 @@ import java.util.Map;
 import org.apache.pulsar.io.core.annotations.FieldDoc;
 
 @Data
-@Setter
-@Getter
-@EqualsAndHashCode
-@ToString
 @Accessors(chain = true)
 public class KafkaSourceConfig implements Serializable {
 
@@ -97,6 +93,11 @@ public class KafkaSourceConfig implements Serializable {
             "The deserializer class for Kafka consumer to deserialize values. You typically shouldn't care this. "
                 + "Since the deserializer will be set by a specific implementation of `KafkaAbstractSource`.")
     private String valueDeserializationClass = "org.apache.kafka.common.serialization.ByteArrayDeserializer";
+    @FieldDoc(
+            defaultValue = "earliest",
+            help =
+                    "The default offset reset policy.")
+    private String autoOffsetReset = "earliest";
     @FieldDoc(
         defaultValue = "",
         help =

@@ -18,6 +18,15 @@
  */
 package org.apache.pulsar.stats.client;
 
+import static org.mockito.Mockito.spy;
+import static org.testng.Assert.assertEquals;
+import static org.testng.Assert.assertFalse;
+import static org.testng.Assert.assertNotNull;
+import static org.testng.Assert.assertTrue;
+import java.net.URL;
+import java.util.concurrent.TimeUnit;
+import javax.ws.rs.ClientErrorException;
+import javax.ws.rs.ServerErrorException;
 import org.apache.pulsar.broker.service.persistent.PersistentTopic;
 import org.apache.pulsar.client.admin.PulsarAdmin;
 import org.apache.pulsar.client.admin.PulsarAdminException;
@@ -31,8 +40,6 @@ import org.apache.pulsar.client.api.Consumer;
 import org.apache.pulsar.client.api.Message;
 import org.apache.pulsar.client.api.Producer;
 import org.apache.pulsar.client.api.ProducerConsumerBase;
-import org.apache.pulsar.client.api.PulsarClient;
-import org.apache.pulsar.client.api.PulsarClientException;
 import org.apache.pulsar.common.policies.data.PersistentTopicInternalStats;
 import org.apache.pulsar.common.policies.data.PersistentTopicInternalStats.CursorStats;
 import org.slf4j.Logger;
@@ -41,16 +48,7 @@ import org.testng.annotations.AfterMethod;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
-import javax.ws.rs.ClientErrorException;
-import javax.ws.rs.ServerErrorException;
-import java.net.URL;
-import java.util.concurrent.TimeUnit;
-
-import static org.mockito.Mockito.spy;
-import static org.testng.Assert.assertEquals;
-import static org.testng.Assert.assertTrue;
-import static org.testng.Assert.fail;
-
+@Test(groups = "stats")
 public class PulsarBrokerStatsClientTest extends ProducerConsumerBase {
 
     @BeforeMethod
@@ -60,7 +58,7 @@ public class PulsarBrokerStatsClientTest extends ProducerConsumerBase {
         super.producerBaseSetup();
     }
 
-    @AfterMethod
+    @AfterMethod(alwaysRun = true)
     @Override
     protected void cleanup() throws Exception {
         super.internalCleanup();
@@ -94,7 +92,7 @@ public class PulsarBrokerStatsClientTest extends ProducerConsumerBase {
         assertTrue(client.getApiException(new ServerErrorException(500)) instanceof ServerSideErrorException);
         assertTrue(client.getApiException(new ServerErrorException(503)) instanceof PulsarAdminException);
 
-        log.info("Client: ", client);
+        log.info("Client: -- {}", client);
 
         admin.close();
     }
@@ -124,72 +122,16 @@ public class PulsarBrokerStatsClientTest extends ProducerConsumerBase {
         }
 
         PersistentTopic topic = (PersistentTopic) pulsar.getBrokerService().getOrCreateTopic(topicName).get();
-        PersistentTopicInternalStats internalStats = topic.getInternalStats();
+        PersistentTopicInternalStats internalStats = topic.getInternalStats(true).get();
+        assertNotNull(internalStats.ledgers.get(0).metadata);
         CursorStats cursor = internalStats.cursors.get(subscriptionName);
         assertEquals(cursor.numberOfEntriesSinceFirstNotAckedMessage, numberOfMsgs);
         assertTrue(cursor.totalNonContiguousDeletedMessagesRange > 0
                 && (cursor.totalNonContiguousDeletedMessagesRange) < numberOfMsgs / 2);
-
+        assertFalse(cursor.subscriptionHavePendingRead);
+        assertFalse(cursor.subscriptionHavePendingReplayRead);
         producer.close();
         consumer.close();
-        log.info("-- Exiting {} test --", methodName);
-    }
-
-    @Test
-    public void testGetPartitionedTopicMetaData() throws Exception {
-        log.info("-- Starting {} test --", methodName);
-
-        final String topicName = "persistent://my-property/my-ns/my-topic1";
-        final String subscriptionName = "my-subscriber-name";
-
-        try {
-            String url = "http://localhost:" + BROKER_WEBSERVICE_PORT;
-            if (isTcpLookup) {
-                url = "pulsar://localhost:" + BROKER_PORT;
-            }
-            PulsarClient client = newPulsarClient(url, 0);
-
-            Consumer<byte[]> consumer = client.newConsumer().topic(topicName).subscriptionName(subscriptionName)
-                    .acknowledgmentGroupTime(0, TimeUnit.SECONDS).subscribe();
-            Producer<byte[]> producer = client.newProducer().topic(topicName).create();
-
-            consumer.close();
-            producer.close();
-            client.close();
-        } catch (PulsarClientException pce) {
-            log.error("create producer or consumer error: ", pce);
-            fail();
-        }
-
-        log.info("-- Exiting {} test --", methodName);
-    }
-
-    @Test (timeOut = 4000)
-    public void testGetPartitionedTopicDataTimeout() {
-        log.info("-- Starting {} test --", methodName);
-
-        final String topicName = "persistent://my-property/my-ns/my-topic1";
-
-        String url = "http://localhost:51000,localhost:51001";
-        if (isTcpLookup) {
-            url = "pulsar://localhost:51000,localhost:51001";
-        }
-
-        PulsarClient client;
-        try {
-            client = PulsarClient.builder()
-                    .serviceUrl(url)
-                    .statsInterval(0, TimeUnit.SECONDS)
-                    .operationTimeout(3, TimeUnit.SECONDS)
-                    .build();
-
-            Producer<byte[]> producer = client.newProducer().topic(topicName).create();
-
-            fail();
-        } catch (PulsarClientException pce) {
-            log.error("create producer error: ", pce);
-        }
-
         log.info("-- Exiting {} test --", methodName);
     }
 

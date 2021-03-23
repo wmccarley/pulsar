@@ -132,6 +132,9 @@ public class KeyValueSchema<K, V> implements Schema<KeyValue<K, V>> {
                 valueSchema
             );
         } else {
+            if (message.getValue() == null) {
+                return null;
+            }
             return valueSchema.encode(message.getValue());
         }
     }
@@ -150,16 +153,25 @@ public class KeyValueSchema<K, V> implements Schema<KeyValue<K, V>> {
 
     public KeyValue<K, V> decode(byte[] keyBytes, byte[] valueBytes, byte[] schemaVersion) {
         K k;
-        if (keySchema.supportSchemaVersioning() && schemaVersion != null) {
-            k = keySchema.decode(keyBytes, schemaVersion);
+        if (keyBytes == null) {
+            k = null;
         } else {
-            k = keySchema.decode(keyBytes);
+            if (keySchema.supportSchemaVersioning() && schemaVersion != null) {
+                k = keySchema.decode(keyBytes, schemaVersion);
+            } else {
+                k = keySchema.decode(keyBytes);
+            }
         }
+
         V v;
-        if (valueSchema.supportSchemaVersioning() && schemaVersion != null) {
-            v = valueSchema.decode(valueBytes, schemaVersion);
+        if (valueBytes == null) {
+            v = null;
         } else {
-            v = valueSchema.decode(valueBytes);
+            if (valueSchema.supportSchemaVersioning() && schemaVersion != null) {
+                v = valueSchema.decode(valueBytes, schemaVersion);
+            } else {
+                v = valueSchema.decode(valueBytes);
+            }
         }
         return new KeyValue<>(k, v);
     }
@@ -193,6 +205,11 @@ public class KeyValueSchema<K, V> implements Schema<KeyValue<K, V>> {
         }
     }
 
+    @Override
+    public Schema<KeyValue<K, V>> clone() {
+        return KeyValueSchema.of(keySchema.clone(), valueSchema.clone(), keyValueEncodingType);
+    }
+
     private void configureKeyValueSchemaInfo() {
         this.schemaInfo = KeyValueSchemaInfo.encodeKeyValueSchemaInfo(
             keySchema, valueSchema, keyValueEncodingType
@@ -208,7 +225,7 @@ public class KeyValueSchema<K, V> implements Schema<KeyValue<K, V>> {
             @Override
             public CompletableFuture<SchemaInfo> getLatestSchema() {
                 return CompletableFuture.completedFuture(
-                    ((StructSchema<K>) keySchema).schemaInfo);
+                    ((AbstractStructSchema<K>) keySchema).schemaInfo);
             }
 
             @Override
@@ -227,7 +244,7 @@ public class KeyValueSchema<K, V> implements Schema<KeyValue<K, V>> {
             @Override
             public CompletableFuture<SchemaInfo> getLatestSchema() {
                 return CompletableFuture.completedFuture(
-                    ((StructSchema<V>) valueSchema).schemaInfo);
+                    ((AbstractStructSchema<V>) valueSchema).schemaInfo);
             }
 
             @Override

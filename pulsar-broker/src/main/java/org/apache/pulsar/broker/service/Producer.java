@@ -20,9 +20,9 @@ package org.apache.pulsar.broker.service;
 
 import static com.google.common.base.Preconditions.checkNotNull;
 import static com.scurrilous.circe.checksum.Crc32cIntChecksum.computeChecksum;
+import static org.apache.pulsar.broker.service.AbstractReplicator.REPL_PRODUCER_NAME_DELIMITER;
 import static org.apache.pulsar.common.protocol.Commands.hasChecksum;
 import static org.apache.pulsar.common.protocol.Commands.readChecksum;
-
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.MoreObjects;
 import io.netty.buffer.ByteBuf;
@@ -31,41 +31,43 @@ import io.netty.util.Recycler.Handle;
 import java.util.Collections;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLongFieldUpdater;
-
-import org.apache.bookkeeper.mledger.util.Rate;
 import org.apache.pulsar.broker.authentication.AuthenticationDataSource;
 import org.apache.pulsar.broker.service.BrokerServiceException.TopicClosedException;
 import org.apache.pulsar.broker.service.BrokerServiceException.TopicTerminatedException;
 import org.apache.pulsar.broker.service.Topic.PublishContext;
 import org.apache.pulsar.broker.service.nonpersistent.NonPersistentTopic;
 import org.apache.pulsar.broker.service.persistent.PersistentTopic;
-import org.apache.pulsar.common.protocol.Commands;
-import org.apache.pulsar.common.api.proto.PulsarApi.MessageMetadata;
-import org.apache.pulsar.common.api.proto.PulsarApi.ServerError;
+import org.apache.pulsar.client.api.transaction.TxnID;
+import org.apache.pulsar.common.api.proto.MessageMetadata;
+import org.apache.pulsar.common.api.proto.ProducerAccessMode;
+import org.apache.pulsar.common.api.proto.ServerError;
 import org.apache.pulsar.common.naming.TopicName;
 import org.apache.pulsar.common.policies.data.NonPersistentPublisherStats;
 import org.apache.pulsar.common.policies.data.PublisherStats;
+import org.apache.pulsar.common.protocol.Commands;
 import org.apache.pulsar.common.protocol.schema.SchemaVersion;
+import org.apache.pulsar.common.stats.Rate;
 import org.apache.pulsar.common.util.DateFormatter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import static org.apache.pulsar.broker.service.AbstractReplicator.REPL_PRODUCER_NAME_DELIMITER;
 
 /**
- * Represents a currently connected producer
+ * Represents a currently connected producer.
  */
 public class Producer {
     private final Topic topic;
-    private final ServerCnx cnx;
+    private final TransportCnx cnx;
     private final String producerName;
     private final long epoch;
     private final boolean userProvidedProducerName;
     private final long producerId;
     private final String appId;
     private Rate msgIn;
+    private Rate chuckedMessageRate;
     // it records msg-drop rate only for non-persistent topic
     private final Rate msgDrop;
     private AuthenticationDataSource authenticationData;
@@ -83,13 +85,18 @@ public class Producer {
     private final boolean isNonPersistentTopic;
     private final boolean isEncrypted;
 
+    private final ProducerAccessMode accessMode;
+    private Optional<Long> topicEpoch;
+
     private final Map<String, String> metadata;
 
     private final SchemaVersion schemaVersion;
 
-    public Producer(Topic topic, ServerCnx cnx, long producerId, String producerName, String appId,
+    public Producer(Topic topic, TransportCnx cnx, long producerId, String producerName, String appId,
             boolean isEncrypted, Map<String, String> metadata, SchemaVersion schemaVersion, long epoch,
-            boolean userProvidedProducerName) {
+            boolean userProvidedProducerName,
+            ProducerAccessMode accessMode,
+            Optional<Long> topicEpoch) {
         this.topic = topic;
         this.cnx = cnx;
         this.producerId = producerId;
@@ -98,20 +105,26 @@ public class Producer {
         this.epoch = epoch;
         this.closeFuture = new CompletableFuture<>();
         this.appId = appId;
-        this.authenticationData = cnx.authenticationData;
+        this.authenticationData = cnx.getAuthenticationData();
         this.msgIn = new Rate();
+        this.chuckedMessageRate = new Rate();
         this.isNonPersistentTopic = topic instanceof NonPersistentTopic;
         this.msgDrop = this.isNonPersistentTopic ? new Rate() : null;
 
         this.metadata = metadata != null ? metadata : Collections.emptyMap();
 
         this.stats = isNonPersistentTopic ? new NonPersistentPublisherStats() : new PublisherStats();
-        stats.setAddress(cnx.clientAddress().toString());
+        if (cnx.hasHAProxyMessage()) {
+            stats.setAddress(cnx.getHAProxyMessage().sourceAddress() + ":" + cnx.getHAProxyMessage().sourcePort());
+        } else {
+            stats.setAddress(cnx.clientAddress().toString());
+        }
         stats.setConnectedSince(DateFormatter.now());
         stats.setClientVersion(cnx.getClientVersion());
         stats.setProducerName(producerName);
         stats.producerId = producerId;
         stats.metadata = this.metadata;
+        stats.accessMode = Commands.convertProducerAccessMode(accessMode);
 
         this.isRemote = producerName
                 .startsWith(cnx.getBrokerService().pulsar().getConfiguration().getReplicatorPrefix());
@@ -119,6 +132,8 @@ public class Producer {
 
         this.isEncrypted = isEncrypted;
         this.schemaVersion = schemaVersion;
+        this.accessMode = accessMode;
+        this.topicEpoch = topicEpoch;
     }
 
     @Override
@@ -136,43 +151,45 @@ public class Producer {
         return false;
     }
 
-    public void publishMessage(long producerId, long sequenceId, ByteBuf headersAndPayload, long batchSize) {
-        beforePublish(producerId, sequenceId, headersAndPayload, batchSize);
-        publishMessageToTopic(headersAndPayload, sequenceId, batchSize);
+    public void publishMessage(long producerId, long sequenceId, ByteBuf headersAndPayload, long batchSize,
+            boolean isChunked) {
+        if (checkAndStartPublish(producerId, sequenceId, headersAndPayload, batchSize)) {
+            publishMessageToTopic(headersAndPayload, sequenceId, batchSize, isChunked);
+        }
     }
 
     public void publishMessage(long producerId, long lowestSequenceId, long highestSequenceId,
-           ByteBuf headersAndPayload, long batchSize) {
+            ByteBuf headersAndPayload, long batchSize, boolean isChunked) {
         if (lowestSequenceId > highestSequenceId) {
-            cnx.ctx().channel().eventLoop().execute(() -> {
-                cnx.ctx().writeAndFlush(Commands.newSendError(producerId, highestSequenceId, ServerError.MetadataError,
-                        "Invalid lowest or highest sequence id"));
-                cnx.completedSendOperation(isNonPersistentTopic);
+            cnx.execute(() -> {
+                cnx.getCommandSender().sendSendError(producerId, highestSequenceId, ServerError.MetadataError,
+                        "Invalid lowest or highest sequence id");
+                cnx.completedSendOperation(isNonPersistentTopic, headersAndPayload.readableBytes());
             });
             return;
         }
-        beforePublish(producerId, highestSequenceId, headersAndPayload, batchSize);
-        publishMessageToTopic(headersAndPayload, lowestSequenceId, highestSequenceId, batchSize);
+        if (checkAndStartPublish(producerId, highestSequenceId, headersAndPayload, batchSize)) {
+            publishMessageToTopic(headersAndPayload, lowestSequenceId, highestSequenceId, batchSize, isChunked);
+        }
     }
 
-    public void beforePublish(long producerId, long sequenceId, ByteBuf headersAndPayload, long batchSize) {
+    public boolean checkAndStartPublish(long producerId, long sequenceId, ByteBuf headersAndPayload, long batchSize) {
         if (isClosed) {
-            cnx.ctx().channel().eventLoop().execute(() -> {
-                cnx.ctx().writeAndFlush(Commands.newSendError(producerId, sequenceId, ServerError.PersistenceError,
-                        "Producer is closed"));
-                cnx.completedSendOperation(isNonPersistentTopic);
+            cnx.execute(() -> {
+                cnx.getCommandSender().sendSendError(producerId, sequenceId, ServerError.PersistenceError,
+                        "Producer is closed");
+                cnx.completedSendOperation(isNonPersistentTopic, headersAndPayload.readableBytes());
             });
-
-            return;
+            return false;
         }
 
         if (!verifyChecksum(headersAndPayload)) {
-            cnx.ctx().channel().eventLoop().execute(() -> {
-                cnx.ctx().writeAndFlush(
-                        Commands.newSendError(producerId, sequenceId, ServerError.ChecksumError, "Checksum failed on the broker"));
-                cnx.completedSendOperation(isNonPersistentTopic);
+            cnx.execute(() -> {
+                cnx.getCommandSender().sendSendError(producerId, sequenceId, ServerError.ChecksumError,
+                        "Checksum failed on the broker");
+                cnx.completedSendOperation(isNonPersistentTopic, headersAndPayload.readableBytes());
             });
-            return;
+            return false;
         }
 
         if (topic.isEncryptionRequired()) {
@@ -180,32 +197,36 @@ public class Producer {
             headersAndPayload.markReaderIndex();
             MessageMetadata msgMetadata = Commands.parseMessageMetadata(headersAndPayload);
             headersAndPayload.resetReaderIndex();
-
+            int encryptionKeysCount = msgMetadata.getEncryptionKeysCount();
             // Check whether the message is encrypted or not
-            if (msgMetadata.getEncryptionKeysCount() < 1) {
+            if (encryptionKeysCount < 1) {
                 log.warn("[{}] Messages must be encrypted", getTopic().getName());
-                cnx.ctx().channel().eventLoop().execute(() -> {
-                    cnx.ctx().writeAndFlush(Commands.newSendError(producerId, sequenceId, ServerError.MetadataError,
-                            "Messages must be encrypted"));
-                    cnx.completedSendOperation(isNonPersistentTopic);
+                cnx.execute(() -> {
+                    cnx.getCommandSender().sendSendError(producerId, sequenceId, ServerError.MetadataError,
+                            "Messages must be encrypted");
+                    cnx.completedSendOperation(isNonPersistentTopic, headersAndPayload.readableBytes());
                 });
-                return;
+                return false;
             }
         }
 
         startPublishOperation((int) batchSize, headersAndPayload.readableBytes());
+        return true;
     }
 
-    private void publishMessageToTopic(ByteBuf headersAndPayload, long sequenceId, long batchSize) {
+    private void publishMessageToTopic(ByteBuf headersAndPayload, long sequenceId, long batchSize, boolean isChunked) {
         topic.publishMessage(headersAndPayload,
-                MessagePublishContext.get(this, sequenceId, msgIn, headersAndPayload.readableBytes(), batchSize,
-                        System.nanoTime()));
+                MessagePublishContext.get(this, sequenceId, msgIn,
+                        headersAndPayload.readableBytes(), batchSize,
+                        isChunked, System.nanoTime()));
     }
 
-    private void publishMessageToTopic(ByteBuf headersAndPayload, long lowestSequenceId, long highestSequenceId, long batchSize) {
+    private void publishMessageToTopic(ByteBuf headersAndPayload, long lowestSequenceId, long highestSequenceId,
+                                       long batchSize, boolean isChunked) {
         topic.publishMessage(headersAndPayload,
-                MessagePublishContext.get(this, lowestSequenceId, highestSequenceId, msgIn, headersAndPayload.readableBytes(), batchSize,
-                        System.nanoTime()));
+                MessagePublishContext.get(this, lowestSequenceId,
+                        highestSequenceId, msgIn, headersAndPayload.readableBytes(), batchSize,
+                        isChunked, System.nanoTime()));
     }
 
     private boolean verifyChecksum(ByteBuf headersAndPayload) {
@@ -262,8 +283,9 @@ public class Producer {
     }
 
     /**
-     * Return the sequence id of
-     * @return
+     * Return the sequence id of.
+     *
+     * @return the sequence id
      */
     public long getLastSequenceId() {
         if (isNonPersistentTopic) {
@@ -273,7 +295,7 @@ public class Producer {
         }
     }
 
-    public ServerCnx getCnx() {
+    public TransportCnx getCnx() {
         return this.cnx;
     }
 
@@ -285,6 +307,8 @@ public class Producer {
         private Rate rateIn;
         private int msgSize;
         private long batchSize;
+        private boolean chunked;
+
         private long startTimeNs;
 
         private String originalProducerName;
@@ -299,6 +323,10 @@ public class Producer {
 
         public long getSequenceId() {
             return sequenceId;
+        }
+
+        public boolean isChunked() {
+            return chunked;
         }
 
         @Override
@@ -337,23 +365,22 @@ public class Producer {
         }
 
         /**
-         * Executed from managed ledger thread when the message is persisted
+         * Executed from managed ledger thread when the message is persisted.
          */
         @Override
         public void completed(Exception exception, long ledgerId, long entryId) {
             if (exception != null) {
-                ServerError serverError = (exception instanceof TopicTerminatedException)
-                        ? ServerError.TopicTerminatedError : ServerError.PersistenceError;
+                final ServerError serverError = getServerError(exception);
 
-                producer.cnx.ctx().channel().eventLoop().execute(() -> {
+                producer.cnx.execute(() -> {
                     if (!(exception instanceof TopicClosedException)) {
                         // For TopicClosed exception there's no need to send explicit error, since the client was
                         // already notified
                         long callBackSequenceId = Math.max(highestSequenceId, sequenceId);
-                        producer.cnx.ctx().writeAndFlush(Commands.newSendError(producer.producerId, callBackSequenceId,
-                                serverError, exception.getMessage()));
+                        producer.cnx.getCommandSender().sendSendError(producer.producerId, callBackSequenceId,
+                                serverError, exception.getMessage());
                     }
-                    producer.cnx.completedSendOperation(producer.isNonPersistentTopic);
+                    producer.cnx.completedSendOperation(producer.isNonPersistentTopic, msgSize);
                     producer.publishOperationCompleted();
                     recycle();
                 });
@@ -365,12 +392,24 @@ public class Producer {
 
                 this.ledgerId = ledgerId;
                 this.entryId = entryId;
-                producer.cnx.ctx().channel().eventLoop().execute(this);
+                producer.cnx.execute(this);
             }
         }
 
+        private ServerError getServerError(Exception exception) {
+            ServerError serverError;
+            if (exception instanceof TopicTerminatedException) {
+                serverError = ServerError.TopicTerminatedError;
+            } else if (exception instanceof BrokerServiceException.NotAllowedException) {
+                serverError = ServerError.NotAllowedError;
+            } else {
+                serverError = ServerError.PersistenceError;
+            }
+            return serverError;
+        }
+
         /**
-         * Executed from I/O thread when sending receipt back to client
+         * Executed from I/O thread when sending receipt back to client.
          */
         @Override
         public void run() {
@@ -382,22 +421,25 @@ public class Producer {
             // stats
             rateIn.recordMultipleEvents(batchSize, msgSize);
             producer.topic.recordAddLatency(System.nanoTime() - startTimeNs, TimeUnit.NANOSECONDS);
-            producer.cnx.ctx().writeAndFlush(
-                    Commands.newSendReceipt(producer.producerId, sequenceId, highestSequenceId, ledgerId, entryId),
-                    producer.cnx.ctx().voidPromise());
-            producer.cnx.completedSendOperation(producer.isNonPersistentTopic);
+            producer.cnx.getCommandSender().sendSendReceiptResponse(producer.producerId, sequenceId, highestSequenceId,
+                    ledgerId, entryId);
+            producer.cnx.completedSendOperation(producer.isNonPersistentTopic, msgSize);
+            if (this.chunked) {
+                producer.chuckedMessageRate.recordEvent();
+            }
             producer.publishOperationCompleted();
             recycle();
         }
 
         static MessagePublishContext get(Producer producer, long sequenceId, Rate rateIn, int msgSize,
-                long batchSize, long startTimeNs) {
+                long batchSize, boolean chunked, long startTimeNs) {
             MessagePublishContext callback = RECYCLER.get();
             callback.producer = producer;
             callback.sequenceId = sequenceId;
             callback.rateIn = rateIn;
             callback.msgSize = msgSize;
             callback.batchSize = batchSize;
+            callback.chunked = chunked;
             callback.originalProducerName = null;
             callback.originalSequenceId = -1L;
             callback.startTimeNs = startTimeNs;
@@ -405,7 +447,7 @@ public class Producer {
         }
 
         static MessagePublishContext get(Producer producer, long lowestSequenceId, long highestSequenceId, Rate rateIn,
-                 int msgSize, long batchSize, long startTimeNs) {
+                int msgSize, long batchSize, boolean chunked, long startTimeNs) {
             MessagePublishContext callback = RECYCLER.get();
             callback.producer = producer;
             callback.sequenceId = lowestSequenceId;
@@ -416,7 +458,13 @@ public class Producer {
             callback.originalProducerName = null;
             callback.originalSequenceId = -1L;
             callback.startTimeNs = startTimeNs;
+            callback.chunked = chunked;
             return callback;
+        }
+
+        @Override
+        public long getNumberOfMessages() {
+            return batchSize;
         }
 
         private final Handle<MessagePublishContext> recyclerHandle;
@@ -426,7 +474,7 @@ public class Producer {
         }
 
         private static final Recycler<MessagePublishContext> RECYCLER = new Recycler<MessagePublishContext>() {
-            protected MessagePublishContext newObject(Recycler.Handle<MessagePublishContext> handle) {
+            protected MessagePublishContext newObject(Handle<MessagePublishContext> handle) {
                 return new MessagePublishContext(handle);
             }
         };
@@ -443,6 +491,7 @@ public class Producer {
             entryId = -1L;
             batchSize = 0L;
             startTimeNs = -1L;
+            chunked = false;
             recyclerHandle.recycle(this);
         }
     }
@@ -493,7 +542,7 @@ public class Producer {
         return closeFuture;
     }
 
-    void closeNow(boolean removeFromTopic) {
+    public void closeNow(boolean removeFromTopic) {
         if (removeFromTopic) {
             topic.removeProducer(this);
         }
@@ -514,7 +563,7 @@ public class Producer {
     public CompletableFuture<Void> disconnect() {
         if (!closeFuture.isDone()) {
             log.info("Disconnecting producer: {}", this);
-            cnx.ctx().executor().execute(() -> {
+            cnx.execute(() -> {
                 cnx.closeProducer(this);
                 closeNow(true);
             });
@@ -524,14 +573,22 @@ public class Producer {
 
     public void updateRates() {
         msgIn.calculateRate();
+        chuckedMessageRate.calculateRate();
         stats.msgRateIn = msgIn.getRate();
         stats.msgThroughputIn = msgIn.getValueRate();
         stats.averageMsgSize = msgIn.getAverageValue();
+        stats.chunkedMessageRate = chuckedMessageRate.getRate();
+        if (chuckedMessageRate.getCount() > 0 && this.topic instanceof PersistentTopic) {
+            ((PersistentTopic) this.topic).msgChunkPublished = true;
+        }
         if (this.isNonPersistentTopic) {
             msgDrop.calculateRate();
             ((NonPersistentPublisherStats) stats).msgDropRate = msgDrop.getRate();
         }
+    }
 
+    public void updateRates(int numOfMessages, long msgSizeInBytes) {
+        msgIn.recordMultipleEvents(numOfMessages, msgSizeInBytes);
     }
 
     public boolean isRemote() {
@@ -588,8 +645,24 @@ public class Producer {
         }
     }
 
+    public void publishTxnMessage(TxnID txnID, long producerId, long sequenceId, long highSequenceId,
+                                  ByteBuf headersAndPayload, long batchSize, boolean isChunked) {
+        checkAndStartPublish(producerId, sequenceId, headersAndPayload, batchSize);
+        topic.publishTxnMessage(txnID, headersAndPayload,
+                MessagePublishContext.get(this, sequenceId, highSequenceId, msgIn,
+                        headersAndPayload.readableBytes(), batchSize, isChunked, System.nanoTime()));
+    }
+
     public SchemaVersion getSchemaVersion() {
         return schemaVersion;
+    }
+
+    public ProducerAccessMode getAccessMode() {
+        return accessMode;
+    }
+
+    public Optional<Long> getTopicEpoch() {
+        return topicEpoch;
     }
 
     private static final Logger log = LoggerFactory.getLogger(Producer.class);

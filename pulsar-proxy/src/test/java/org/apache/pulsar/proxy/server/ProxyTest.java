@@ -24,18 +24,19 @@ import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.mockito.Mockito.doReturn;
 import static org.testng.Assert.assertEquals;
 
+import io.netty.channel.EventLoopGroup;
+import io.netty.util.concurrent.DefaultThreadFactory;
+
 import java.util.Optional;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 
-import io.netty.channel.EventLoopGroup;
-import io.netty.util.concurrent.DefaultThreadFactory;
-
+import lombok.Cleanup;
 import lombok.Data;
 import lombok.EqualsAndHashCode;
 import lombok.ToString;
+
 import org.apache.avro.reflect.Nullable;
-import org.apache.bookkeeper.test.PortManager;
 import org.apache.pulsar.broker.auth.MockedPulsarServiceBaseTest;
 import org.apache.pulsar.broker.authentication.AuthenticationService;
 import org.apache.pulsar.client.api.Consumer;
@@ -44,18 +45,20 @@ import org.apache.pulsar.client.api.MessageRoutingMode;
 import org.apache.pulsar.client.api.Producer;
 import org.apache.pulsar.client.api.PulsarClient;
 import org.apache.pulsar.client.api.Schema;
+import org.apache.pulsar.client.api.SubscriptionInitialPosition;
 import org.apache.pulsar.client.api.SubscriptionType;
 import org.apache.pulsar.client.impl.ClientCnx;
 import org.apache.pulsar.client.impl.ConnectionPool;
 import org.apache.pulsar.client.impl.PulsarClientImpl;
 import org.apache.pulsar.client.impl.conf.ClientConfigurationData;
-import org.apache.pulsar.common.api.proto.PulsarApi.CommandActiveConsumerChange;
-import org.apache.pulsar.common.api.proto.PulsarApi.ProtocolVersion;
+import org.apache.pulsar.common.api.proto.CommandActiveConsumerChange;
+import org.apache.pulsar.common.api.proto.ProtocolVersion;
 import org.apache.pulsar.common.configuration.PulsarConfigurationLoader;
 import org.apache.pulsar.common.naming.TopicName;
 import org.apache.pulsar.common.policies.data.TenantInfo;
 import org.apache.pulsar.common.schema.SchemaInfo;
 import org.apache.pulsar.common.util.netty.EventLoopUtil;
+import org.apache.pulsar.metadata.impl.ZKMetadataStore;
 import org.mockito.Mockito;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -68,11 +71,8 @@ public class ProxyTest extends MockedPulsarServiceBaseTest {
 
     private static final Logger log = LoggerFactory.getLogger(ProxyTest.class);
 
-    private final String DUMMY_VALUE = "DUMMY_VALUE";
-
     private ProxyService proxyService;
     private ProxyConfiguration proxyConfig = new ProxyConfiguration();
-
 
     @Data
     @ToString
@@ -90,19 +90,20 @@ public class ProxyTest extends MockedPulsarServiceBaseTest {
     protected void setup() throws Exception {
         internalSetup();
 
-        proxyConfig.setServicePort(Optional.ofNullable(PortManager.nextFreePort()));
+        proxyConfig.setServicePort(Optional.ofNullable(0));
         proxyConfig.setZookeeperServers(DUMMY_VALUE);
-        proxyConfig.setConfigurationStoreServers(DUMMY_VALUE);
+        proxyConfig.setConfigurationStoreServers(GLOBAL_DUMMY_VALUE);
 
         proxyService = Mockito.spy(new ProxyService(proxyConfig, new AuthenticationService(
                                                             PulsarConfigurationLoader.convertFrom(proxyConfig))));
-        doReturn(mockZooKeeperClientFactory).when(proxyService).getZooKeeperClientFactory();
+        doReturn(new ZKMetadataStore(mockZooKeeper)).when(proxyService).createLocalMetadataStore();
+        doReturn(new ZKMetadataStore(mockZooKeeperGlobal)).when(proxyService).createConfigurationMetadataStore();
 
         proxyService.start();
     }
 
     @Override
-    @AfterClass
+    @AfterClass(alwaysRun = true)
     protected void cleanup() throws Exception {
         internalCleanup();
 
@@ -111,22 +112,27 @@ public class ProxyTest extends MockedPulsarServiceBaseTest {
 
     @Test
     public void testProducer() throws Exception {
-        PulsarClient client = PulsarClient.builder().serviceUrl("pulsar://localhost:" + proxyConfig.getServicePort().get())
+        @Cleanup
+        PulsarClient client = PulsarClient.builder().serviceUrl(proxyService.getServiceUrl())
                 .build();
-        Producer<byte[]> producer = client.newProducer(Schema.BYTES).topic("persistent://sample/test/local/producer-topic")
-                .create();
+
+        @Cleanup
+        Producer<byte[]> producer = client.newProducer()
+            .topic("persistent://sample/test/local/producer-topic")
+            .create();
 
         for (int i = 0; i < 10; i++) {
             producer.send("test".getBytes());
         }
-
-        client.close();
     }
 
     @Test
     public void testProducerConsumer() throws Exception {
-        PulsarClient client = PulsarClient.builder().serviceUrl("pulsar://localhost:" + proxyConfig.getServicePort().get())
+        @Cleanup
+        PulsarClient client = PulsarClient.builder().serviceUrl(proxyService.getServiceUrl())
                 .build();
+
+        @Cleanup
         Producer<byte[]> producer = client.newProducer(Schema.BYTES)
             .topic("persistent://sample/test/local/producer-consumer-topic")
             .enableBatching(false)
@@ -134,6 +140,7 @@ public class ProxyTest extends MockedPulsarServiceBaseTest {
             .create();
 
         // Create a consumer directly attached to broker
+        @Cleanup
         Consumer<byte[]> consumer = pulsarClient.newConsumer()
                 .topic("persistent://sample/test/local/producer-consumer-topic").subscriptionName("my-sub").subscribe();
 
@@ -149,24 +156,25 @@ public class ProxyTest extends MockedPulsarServiceBaseTest {
 
         Message<byte[]> msg = consumer.receive(0, TimeUnit.SECONDS);
         checkArgument(msg == null);
-
-        consumer.close();
-        client.close();
     }
 
     @Test
     public void testPartitions() throws Exception {
-        admin.tenants().createTenant("sample", new TenantInfo());
-        PulsarClient client = PulsarClient.builder().serviceUrl("pulsar://localhost:" + proxyConfig.getServicePort().get())
+        TenantInfo tenantInfo = createDefaultTenantInfo();
+        admin.tenants().createTenant("sample", tenantInfo);
+        @Cleanup
+        PulsarClient client = PulsarClient.builder().serviceUrl(proxyService.getServiceUrl())
                 .build();
         admin.topics().createPartitionedTopic("persistent://sample/test/local/partitioned-topic", 2);
 
+        @Cleanup
         Producer<byte[]> producer = client.newProducer(Schema.BYTES)
             .topic("persistent://sample/test/local/partitioned-topic")
             .enableBatching(false)
             .messageRoutingMode(MessageRoutingMode.RoundRobinPartition).create();
 
         // Create a consumer directly attached to broker
+        @Cleanup
         Consumer<byte[]> consumer = pulsarClient.newConsumer().topic("persistent://sample/test/local/partitioned-topic")
                 .subscriptionName("my-sub").subscribe();
 
@@ -178,40 +186,42 @@ public class ProxyTest extends MockedPulsarServiceBaseTest {
             Message<byte[]> msg = consumer.receive(1, TimeUnit.SECONDS);
             checkNotNull(msg);
         }
-
-        client.close();
     }
 
     @Test
     public void testRegexSubscription() throws Exception {
-        PulsarClient client = PulsarClient.builder().serviceUrl("pulsar://localhost:" + proxyConfig.getServicePort().get())
+        @Cleanup
+        PulsarClient client = PulsarClient.builder().serviceUrl(proxyService.getServiceUrl())
             .connectionsPerBroker(5).ioThreads(5).build();
 
         // create two topics by subscribing to a topic and closing it
         try (Consumer<byte[]> ignored = client.newConsumer()
-            .topic("persistent://sample/test/local/topic1")
-            .subscriptionName("ignored")
+            .topic("persistent://sample/test/local/regex-sub-topic1")
+            .subscriptionName("proxy-ignored")
             .subscribe()) {
         }
         try (Consumer<byte[]> ignored = client.newConsumer()
-            .topic("persistent://sample/test/local/topic2")
-            .subscriptionName("ignored")
+            .topic("persistent://sample/test/local/regex-sub-topic2")
+            .subscriptionName("proxy-ignored")
             .subscribe()) {
         }
 
+        String subName = "regex-sub-proxy-test-" + System.currentTimeMillis();
+
         // make sure regex subscription
-        String regexSubscriptionPattern = "persistent://sample/test/local/topic.*";
+        String regexSubscriptionPattern = "persistent://sample/test/local/regex-sub-topic.*";
         log.info("Regex subscribe to topics {}", regexSubscriptionPattern);
         try (Consumer<byte[]> consumer = client.newConsumer()
             .topicsPattern(regexSubscriptionPattern)
-            .subscriptionName("regex-sub")
+            .subscriptionName(subName)
+            .subscriptionInitialPosition(SubscriptionInitialPosition.Earliest)
             .subscribe()) {
             log.info("Successfully subscribe to topics using regex {}", regexSubscriptionPattern);
 
             final int numMessages = 20;
 
             try (Producer<byte[]> producer = client.newProducer(Schema.BYTES)
-                .topic("persistent://sample/test/local/topic1")
+                .topic("persistent://sample/test/local/regex-sub-topic1")
                 .create()) {
                 for (int i = 0; i < numMessages; i++) {
                     producer.send(("message-" + i).getBytes(UTF_8));
@@ -227,13 +237,14 @@ public class ProxyTest extends MockedPulsarServiceBaseTest {
 
     @Test
     public void testGetSchema() throws Exception {
-        PulsarClient client = PulsarClient.builder().serviceUrl("pulsar://localhost:" + proxyConfig.getServicePort().get())
+        @Cleanup
+        PulsarClient client = PulsarClient.builder().serviceUrl(proxyService.getServiceUrl())
                 .build();
-        Producer<Foo> producer;
-        Schema schema = Schema.AVRO(Foo.class);
+        Schema<Foo> schema = Schema.AVRO(Foo.class);
         try {
-            producer = client.newProducer(schema).topic("persistent://sample/test/local/get-schema")
-                    .create();
+            try (Producer<Foo> ignored = client.newProducer(schema).topic("persistent://sample/test/local/get-schema")
+                .create()) {
+            }
         } catch (Exception ex) {
             Assert.fail("Should not have failed since can acquire LookupRequestSemaphore");
         }
@@ -242,23 +253,26 @@ public class ProxyTest extends MockedPulsarServiceBaseTest {
         for (int i = 0; i<8; i++){
             schemaVersion[i] = b;
         }
-        SchemaInfo schemaInfo = ((PulsarClientImpl)client).getLookup()
+        SchemaInfo schemaInfo = ((PulsarClientImpl) client).getLookup()
                 .getSchema(TopicName.get("persistent://sample/test/local/get-schema"), schemaVersion).get().orElse(null);
         Assert.assertEquals(new String(schemaInfo.getSchema()), new String(schema.getSchemaInfo().getSchema()));
-        client.close();
     }
 
     @Test
     public void testProtocolVersionAdvertisement() throws Exception {
-        final String url = "pulsar://localhost:" + proxyConfig.getServicePort().get();
         final String topic = "persistent://sample/test/local/protocol-version-advertisement";
         final String sub = "my-sub";
 
         ClientConfigurationData conf = new ClientConfigurationData();
-        conf.setServiceUrl(url);
+        conf.setServiceUrl(proxyService.getServiceUrl());
+
+        @Cleanup
         PulsarClient client = getClientActiveConsumerChangeNotSupported(conf);
 
+        @Cleanup
         Producer<byte[]> producer = client.newProducer().topic(topic).create();
+
+        @Cleanup
         Consumer<byte[]> consumer = client.newConsumer().topic(topic).subscriptionName(sub)
                 .subscriptionType(SubscriptionType.Failover).subscribe();
 
@@ -271,12 +285,7 @@ public class ProxyTest extends MockedPulsarServiceBaseTest {
             checkNotNull(msg);
             consumer.acknowledge(msg);
         }
-
-        producer.close();
-        consumer.close();
-        client.close();
     }
-
 
     private static PulsarClient getClientActiveConsumerChangeNotSupported(ClientConfigurationData conf)
             throws Exception {

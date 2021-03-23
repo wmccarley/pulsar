@@ -118,8 +118,47 @@ long pulsar_configure_get_negative_ack_redelivery_delay_ms(
     return consumer_configuration->consumerConfiguration.getNegativeAckRedeliveryDelayMs();
 }
 
+void pulsar_configure_set_ack_grouping_time_ms(pulsar_consumer_configuration_t *consumer_configuration,
+                                               long ackGroupingMillis) {
+    consumer_configuration->consumerConfiguration.setAckGroupingTimeMs(ackGroupingMillis);
+}
+
+long pulsar_configure_get_ack_grouping_time_ms(pulsar_consumer_configuration_t *consumer_configuration) {
+    return consumer_configuration->consumerConfiguration.getAckGroupingTimeMs();
+}
+
+void pulsar_configure_set_ack_grouping_max_size(pulsar_consumer_configuration_t *consumer_configuration,
+                                                long maxGroupingSize) {
+    consumer_configuration->consumerConfiguration.setAckGroupingMaxSize(maxGroupingSize);
+}
+
+long pulsar_configure_get_ack_grouping_max_size(pulsar_consumer_configuration_t *consumer_configuration) {
+    return consumer_configuration->consumerConfiguration.getAckGroupingMaxSize();
+}
+
 int pulsar_consumer_is_encryption_enabled(pulsar_consumer_configuration_t *consumer_configuration) {
     return consumer_configuration->consumerConfiguration.isEncryptionEnabled();
+}
+
+void pulsar_consumer_configuration_set_default_crypto_key_reader(
+    pulsar_consumer_configuration_t *consumer_configuration, const char *public_key_path,
+    const char *private_key_path) {
+    std::shared_ptr<pulsar::DefaultCryptoKeyReader> keyReader =
+        std::make_shared<pulsar::DefaultCryptoKeyReader>(public_key_path, private_key_path);
+    consumer_configuration->consumerConfiguration.setCryptoKeyReader(keyReader);
+}
+
+pulsar_consumer_crypto_failure_action pulsar_consumer_configuration_get_crypto_failure_action(
+    pulsar_consumer_configuration_t *consumer_configuration) {
+    return (pulsar_consumer_crypto_failure_action)
+        consumer_configuration->consumerConfiguration.getCryptoFailureAction();
+}
+
+void pulsar_consumer_configuration_set_crypto_failure_action(
+    pulsar_consumer_configuration_t *consumer_configuration,
+    pulsar_consumer_crypto_failure_action cryptoFailureAction) {
+    consumer_configuration->consumerConfiguration.setCryptoFailureAction(
+        (pulsar::ConsumerCryptoFailureAction)cryptoFailureAction);
 }
 
 int pulsar_consumer_is_read_compacted(pulsar_consumer_configuration_t *consumer_configuration) {

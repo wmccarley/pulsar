@@ -21,15 +21,17 @@ package org.apache.pulsar.broker.service;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
-
 import org.apache.bookkeeper.mledger.Entry;
 import org.apache.bookkeeper.mledger.Position;
 import org.apache.bookkeeper.mledger.impl.PositionImpl;
-import org.apache.pulsar.common.api.proto.PulsarApi.CommandAck.AckType;
-import org.apache.pulsar.common.api.proto.PulsarApi.CommandSubscribe.SubType;
-import org.apache.pulsar.common.api.proto.PulsarMarkers.ReplicatedSubscriptionsSnapshot;
+import org.apache.pulsar.broker.intercept.BrokerInterceptor;
+import org.apache.pulsar.common.api.proto.CommandAck.AckType;
+import org.apache.pulsar.common.api.proto.CommandSubscribe.SubType;
+import org.apache.pulsar.common.api.proto.ReplicatedSubscriptionsSnapshot;
 
 public interface Subscription {
+
+    BrokerInterceptor interceptor();
 
     Topic getTopic();
 
@@ -45,7 +47,7 @@ public interface Subscription {
 
     void consumerFlow(Consumer consumer, int additionalNumberOfMessages);
 
-    void acknowledgeMessage(List<Position> positions, AckType ackType, Map<String,Long> properties);
+    void acknowledgeMessage(List<Position> positions, AckType ackType, Map<String, Long> properties);
 
     String getTopicName();
 
@@ -53,7 +55,7 @@ public interface Subscription {
 
     Dispatcher getDispatcher();
 
-    long getNumberOfEntriesInBacklog();
+    long getNumberOfEntriesInBacklog(boolean getPreciseBacklog);
 
     default long getNumberOfEntriesDelayed() {
         return 0;
@@ -64,6 +66,8 @@ public interface Subscription {
     CompletableFuture<Void> close();
 
     CompletableFuture<Void> delete();
+
+    CompletableFuture<Void> deleteForcefully();
 
     CompletableFuture<Void> disconnect();
 
@@ -79,7 +83,9 @@ public interface Subscription {
 
     CompletableFuture<Entry> peekNthMessage(int messagePosition);
 
-    void expireMessages(int messageTTLInSeconds);
+    boolean expireMessages(int messageTTLInSeconds);
+
+    boolean expireMessages(Position position);
 
     void redeliverUnacknowledgedMessages(Consumer consumer);
 
@@ -98,6 +104,8 @@ public interface Subscription {
     default void processReplicatedSubscriptionSnapshot(ReplicatedSubscriptionsSnapshot snapshot) {
         // Default is no-op
     }
+
+    CompletableFuture<Void> endTxn(long txnidMostBits, long txnidLeastBits, int txnAction, long lowWaterMark);
 
     // Subscription utils
     static boolean isCumulativeAckMode(SubType subType) {

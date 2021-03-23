@@ -18,6 +18,7 @@
  */
 #ifndef PULSAR_PARTITIONED_CONSUMER_HEADER
 #define PULSAR_PARTITIONED_CONSUMER_HEADER
+#include "lib/TestUtil.h"
 #include "ConsumerImpl.h"
 #include "ClientImpl.h"
 #include <vector>
@@ -64,6 +65,7 @@ class PartitionedConsumerImpl : public ConsumerImplBase,
     virtual Result pauseMessageListener();
     virtual Result resumeMessageListener();
     virtual void redeliverUnacknowledgedMessages();
+    virtual void redeliverUnacknowledgedMessages(const std::set<MessageId>& messageIds);
     virtual const std::string& getName() const;
     virtual int getNumOfPrefetchedMessages() const;
     virtual void getBrokerConsumerStatsAsync(BrokerConsumerStatsCallback callback);
@@ -83,6 +85,8 @@ class PartitionedConsumerImpl : public ConsumerImplBase,
     const ConsumerConfiguration conf_;
     typedef std::vector<ConsumerImplPtr> ConsumerList;
     ConsumerList consumers_;
+    // consumersMutex_ is used to share consumers_ and numPartitions_
+    mutable std::mutex consumersMutex_;
     std::mutex mutex_;
     std::mutex pendingReceiveMutex_;
     PartitionedConsumerState state_;
@@ -93,7 +97,15 @@ class PartitionedConsumerImpl : public ConsumerImplBase,
     const std::string topic_;
     const std::string name_;
     const std::string partitionStr_;
+    ExecutorServicePtr internalListenerExecutor_;
+    DeadlineTimerPtr partitionsUpdateTimer_;
+    boost::posix_time::time_duration partitionsUpdateInterval_;
+    LookupServicePtr lookupServicePtr_;
     /* methods */
+    unsigned int getNumPartitions() const;
+    unsigned int getNumPartitionsWithLock() const;
+    ConsumerConfiguration getSinglePartitionConsumerConfig() const;
+    ConsumerImplPtr newInternalConsumer(unsigned int partition, const ConsumerConfiguration& config) const;
     void setState(PartitionedConsumerState state);
     void handleUnsubscribeAsync(Result result, unsigned int consumerIndex, ResultCallback callback);
     void handleSinglePartitionConsumerCreated(Result result, ConsumerImplBaseWeakPtr consumerImplBaseWeakPtr,
@@ -105,9 +117,17 @@ class PartitionedConsumerImpl : public ConsumerImplBase,
     void internalListener(Consumer consumer);
     void receiveMessages();
     void failPendingReceiveCallback();
+    virtual void setNegativeAcknowledgeEnabledForTesting(bool enabled);
     Promise<Result, ConsumerImplBaseWeakPtr> partitionedConsumerCreatedPromise_;
-    UnAckedMessageTrackerScopedPtr unAckedMessageTrackerPtr_;
+    UnAckedMessageTrackerPtr unAckedMessageTrackerPtr_;
     std::queue<ReceiveCallback> pendingReceives_;
+    void runPartitionUpdateTask();
+    void getPartitionMetadata();
+    void handleGetPartitions(const Result result, const LookupDataResultPtr& lookupDataResult);
+
+    friend class PulsarFriend;
+
+    FRIEND_TEST(ConsumerTest, testPartitionedConsumerUnAckedMessageRedelivery);
 };
 typedef std::weak_ptr<PartitionedConsumerImpl> PartitionedConsumerImplWeakPtr;
 typedef std::shared_ptr<PartitionedConsumerImpl> PartitionedConsumerImplPtr;

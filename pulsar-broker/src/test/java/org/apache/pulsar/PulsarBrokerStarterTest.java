@@ -35,10 +35,7 @@ import java.lang.reflect.Method;
 import org.apache.pulsar.broker.ServiceConfiguration;
 import org.testng.annotations.Test;
 
-/**
- * @version $Revision$<br>
- *          Created on Sep 6, 2012
- */
+@Test(groups = "broker")
 public class PulsarBrokerStarterTest {
 
     private File createValidBrokerConfigFile() throws FileNotFoundException {
@@ -61,6 +58,8 @@ public class PulsarBrokerStarterTest {
         printWriter.println("bookkeeperClientHealthCheckErrorThresholdPerInterval=5");
         printWriter.println("bookkeeperClientRackawarePolicyEnabled=true");
         printWriter.println("bookkeeperClientRegionawarePolicyEnabled=false");
+        printWriter.println("bookkeeperClientMinNumRacksPerWriteQuorum=5");
+        printWriter.println("bookkeeperClientEnforceMinNumRacksPerWriteQuorum=true");
         printWriter.println("bookkeeperClientReorderReadSequenceEnabled=false");
         printWriter.println("bookkeeperClientIsolationGroups=group1,group2");
         printWriter.println("backlogQuotaDefaultLimitGB=18");
@@ -78,6 +77,7 @@ public class PulsarBrokerStarterTest {
         printWriter.println("bookkeeperClientTimeoutInSeconds=12345");
         printWriter.println("bookkeeperClientSpeculativeReadTimeoutInMillis=3000");
         printWriter.println("enableRunBookieTogether=true");
+        printWriter.println("bookkeeperExplicitLacIntervalInMills=5");
 
         printWriter.close();
         testConfigFile.deleteOnExit();
@@ -89,7 +89,6 @@ public class PulsarBrokerStarterTest {
      * method returns a non-null {@link ServiceConfiguration} instance where all required settings are filled in and (2)
      * if the property variables inside the given property file are correctly referred to that returned object.
      */
-    @Test
     public void testLoadConfig() throws SecurityException, NoSuchMethodException, IOException, IllegalArgumentException,
             IllegalAccessException, InvocationTargetException {
 
@@ -122,11 +121,14 @@ public class PulsarBrokerStarterTest {
         assertTrue(serviceConfig.isBookkeeperClientHealthCheckEnabled());
         assertEquals(serviceConfig.getBookkeeperClientHealthCheckErrorThresholdPerInterval(), 5);
         assertTrue(serviceConfig.isBookkeeperClientRackawarePolicyEnabled());
+        assertEquals(serviceConfig.getBookkeeperClientMinNumRacksPerWriteQuorum(), 5);
+        assertTrue(serviceConfig.isBookkeeperClientEnforceMinNumRacksPerWriteQuorum());
         assertFalse(serviceConfig.isBookkeeperClientRegionawarePolicyEnabled());
         assertFalse(serviceConfig.isBookkeeperClientReorderReadSequenceEnabled());
         assertEquals(serviceConfig.getBookkeeperClientIsolationGroups(), "group1,group2");
         assertEquals(serviceConfig.getBookkeeperClientSpeculativeReadTimeoutInMillis(), 3000);
         assertEquals(serviceConfig.getBookkeeperClientTimeoutInSeconds(), 12345);
+        assertEquals(serviceConfig.getBookkeeperExplicitLacIntervalInMills(), 5);
     }
 
     @Test

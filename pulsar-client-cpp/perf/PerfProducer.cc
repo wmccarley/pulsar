@@ -48,6 +48,7 @@ struct Arguments {
     bool isTlsAllowInsecureConnection;
     std::string tlsTrustCertsFilePath;
     std::string topic;
+    int memoryLimitMb;
     double rate;
     int msgSize;
     int numTopics;
@@ -62,6 +63,7 @@ struct Arguments {
     unsigned int batchingMaxMessages;
     long batchingMaxAllowedSizeInBytes;
     long batchingMaxPublishDelayMs;
+    bool poolConnections;
     std::string encKeyName;
     std::string encKeyValueFile;
     std::string compression;
@@ -69,22 +71,20 @@ struct Arguments {
 
 namespace pulsar {
 class PulsarFriend {
- public:
-    static Client getClient(const std::string& url, const ClientConfiguration conf,
-                            bool poolConnections) {
+   public:
+    static Client getClient(const std::string& url, const ClientConfiguration conf, bool poolConnections) {
         return Client(url, conf, poolConnections);
     }
 };
-}
+}  // namespace pulsar
 
 unsigned long messagesProduced;
 unsigned long bytesProduced;
 using namespace boost::accumulators;
 using namespace pulsar;
 
-class EncKeyReader: public CryptoKeyReader {
-
-  private:
+class EncKeyReader : public CryptoKeyReader {
+   private:
     std::string pubKeyContents;
 
     void readFile(std::string fileName, std::string& fileContents) const {
@@ -94,8 +94,7 @@ class EncKeyReader: public CryptoKeyReader {
         fileContents = fileStream.str();
     }
 
-  public:
-
+   public:
     EncKeyReader(std::string keyFile) {
         if (keyFile.empty()) {
             return;
@@ -103,12 +102,14 @@ class EncKeyReader: public CryptoKeyReader {
         readFile(keyFile, pubKeyContents);
     }
 
-    Result getPublicKey(const std::string &keyName, std::map<std::string, std::string>& metadata, EncryptionKeyInfo& encKeyInfo) const {
+    Result getPublicKey(const std::string& keyName, std::map<std::string, std::string>& metadata,
+                        EncryptionKeyInfo& encKeyInfo) const {
         encKeyInfo.setKey(pubKeyContents);
         return ResultOk;
     }
 
-    Result getPrivateKey(const std::string &keyName, std::map<std::string, std::string>& metadata, EncryptionKeyInfo& encKeyInfo) const {
+    Result getPrivateKey(const std::string& keyName, std::map<std::string, std::string>& metadata,
+                         EncryptionKeyInfo& encKeyInfo) const {
         return ResultInvalidConfiguration;
     }
 };
@@ -124,21 +125,21 @@ typedef std::unique_lock<std::mutex> Lock;
 
 typedef std::chrono::high_resolution_clock Clock;
 
-void sendCallback(pulsar::Result result, const pulsar::MessageId& msgId, Clock::time_point& publishTime) {
+void sendCallback(pulsar::Result result, const pulsar::MessageId& msgId, size_t msgLength,
+                  Clock::time_point& publishTime) {
     LOG_DEBUG("result = " << result);
     assert(result == pulsar::ResultOk);
-    uint64_t latencyUsec = std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - publishTime).count();
+    uint64_t latencyUsec =
+        std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - publishTime).count();
     Lock lock(mutex);
     ++messagesProduced;
-    // FIXME: Please fix me in here.
-    // bytesProduced += msg.getLength();
+    bytesProduced += msgLength;
     e2eLatencyAccumulator(latencyUsec);
 }
 
 // Start a pulsar producer on a topic and keep producing messages
-void runProducer(const Arguments& args, std::string topicName, int threadIndex,
-                 RateLimiterPtr limiter, pulsar::Producer& producer,
-                 const std::atomic<bool>& exitCondition) {
+void runProducer(const Arguments& args, std::string topicName, int threadIndex, RateLimiterPtr limiter,
+                 pulsar::Producer& producer, const std::atomic<bool>& exitCondition) {
     LOG_INFO("Producing messages for topic = " << topicName << ", threadIndex = " << threadIndex);
 
     std::unique_ptr<char[]> payload(new char[args.msgSize]);
@@ -151,7 +152,8 @@ void runProducer(const Arguments& args, std::string topicName, int threadIndex,
         }
         pulsar::Message msg = builder.create().setAllocatedContent(payload.get(), args.msgSize).build();
 
-        producer.sendAsync(msg, std::bind(sendCallback, std::placeholders::_1, std::placeholders::_2, Clock::now()));
+        producer.sendAsync(msg, std::bind(sendCallback, std::placeholders::_1, std::placeholders::_2,
+                                          msg.getLength(), Clock::now()));
         if (exitCondition) {
             LOG_INFO("Thread interrupted. Exiting producer thread.");
             break;
@@ -159,8 +161,8 @@ void runProducer(const Arguments& args, std::string topicName, int threadIndex,
     }
 }
 
-void startPerfProducer(const Arguments& args, pulsar::ProducerConfiguration &producerConf, pulsar::Client &client,
-        const std::atomic<bool>& exitCondition) {
+void startPerfProducer(const Arguments& args, pulsar::ProducerConfiguration& producerConf,
+                       pulsar::Client& client, const std::atomic<bool>& exitCondition) {
     RateLimiterPtr limiter;
     if (args.rate != -1) {
         limiter = std::make_shared<pulsar::RateLimiter>(args.rate);
@@ -168,24 +170,23 @@ void startPerfProducer(const Arguments& args, pulsar::ProducerConfiguration &pro
 
     producerList.resize(args.numTopics * args.numProducers);
     for (int i = 0; i < args.numTopics; i++) {
-        std::string topic =
-                (args.numTopics == 1) ?
-                        args.topic : args.topic + "-" + std::to_string(i);
+        std::string topic = (args.numTopics == 1) ? args.topic : args.topic + "-" + std::to_string(i);
         LOG_INFO("Adding " << args.numProducers << " producers on topic " << topic);
 
         for (int j = 0; j < args.numProducers; j++) {
-            pulsar::Result result = client.createProducer(topic, producerConf, producerList[i*args.numProducers + j]);
+            pulsar::Result result =
+                client.createProducer(topic, producerConf, producerList[i * args.numProducers + j]);
             if (result != pulsar::ResultOk) {
                 LOG_ERROR("Couldn't create producer: " << result);
                 exit(-1);
             } else {
-                LOG_DEBUG("Created Producer at index " << i*args.numProducers + j);
+                LOG_DEBUG("Created Producer at index " << i * args.numProducers + j);
             }
 
             for (int k = 0; k < args.numOfThreadsPerProducer; k++) {
-                threadList.push_back(std::thread(
-                        std::bind(runProducer, args, topic, k, limiter, producerList[i * args.numProducers + j],
-                                    std::cref(exitCondition))));
+                threadList.push_back(std::thread(std::bind(runProducer, args, topic, k, limiter,
+                                                           producerList[i * args.numProducers + j],
+                                                           std::cref(exitCondition))));
             }
         }
     }
@@ -202,7 +203,7 @@ int main(int argc, char** argv) {
         po::variables_map vm;
         po::options_description confFileDesc;
         confFileDesc.add_options()  //
-        ("serviceURL", po::value<std::string>()->default_value("pulsar://localhost:6650"));
+            ("serviceURL", po::value<std::string>()->default_value("pulsar://localhost:6650"));
 
         po::store(po::parse_config_file<char>(file, confFileDesc, true), vm);
         po::notify(vm);
@@ -217,65 +218,78 @@ int main(int argc, char** argv) {
     positional.add("topic", 1);
 
     po::options_description desc("Allowed options");
-    desc.add_options()  //
-    ("help,h", "Print this help message")  //
+    desc.add_options()                         //
+        ("help,h", "Print this help message")  //
 
-    ("auth-params,v", po::value<std::string>(&args.authParams)->default_value(""), "Authentication parameters, e.g., \"key1:val1,key2:val2\"") //
+        ("memory-limit,ml", po::value<int>(&args.memoryLimitMb)->default_value(64), "Memory limit (MB)")  //
 
-    ("auth-plugin,a", po::value<std::string>(&args.authPlugin)->default_value(""), "Authentication plugin class library path") //
+        ("auth-params,v", po::value<std::string>(&args.authParams)->default_value(""),
+         "Authentication parameters, e.g., \"key1:val1,key2:val2\"")  //
 
-    ("use-tls,b", po::value<bool>(&args.isUseTls)->default_value(false), "Whether tls connection is used")  //
+        ("auth-plugin,a", po::value<std::string>(&args.authPlugin)->default_value(""),
+         "Authentication plugin class library path")  //
 
-    ("allow-insecure,d", po::value<bool>(&args.isTlsAllowInsecureConnection)->default_value(true), "Whether insecure tls connection is allowed")  //
+        ("use-tls,b", po::value<bool>(&args.isUseTls)->default_value(false),
+         "Whether tls connection is used")  //
 
-    ("trust-cert-file,c", po::value<std::string>(&args.tlsTrustCertsFilePath)->default_value(""), "TLS trust certification file path")  //
+        ("allow-insecure,d", po::value<bool>(&args.isTlsAllowInsecureConnection)->default_value(true),
+         "Whether insecure tls connection is allowed")  //
 
-    ("rate,r", po::value<double>(&args.rate)->default_value(100.0),
-     "Publish rate msg/s across topics")  //
-    ("size,s", po::value<int>(&args.msgSize)->default_value(1024), "Message size")  //
+        ("trust-cert-file,c", po::value<std::string>(&args.tlsTrustCertsFilePath)->default_value(""),
+         "TLS trust certification file path")  //
 
-    ("num-topics,t", po::value<int>(&args.numTopics)->default_value(1), "Number of topics")  //
+        ("rate,r", po::value<double>(&args.rate)->default_value(100.0),
+         "Publish rate msg/s across topics")                                            //
+        ("size,s", po::value<int>(&args.msgSize)->default_value(1024), "Message size")  //
 
-    ("num-producers,n", po::value<int>(&args.numProducers)->default_value(1),
-     "Number of producers (per topic)")  //
+        ("num-topics,t", po::value<int>(&args.numTopics)->default_value(1), "Number of topics")  //
 
-    ("num-threads-per-producers", po::value<int>(&args.numOfThreadsPerProducer)->default_value(1),
-     "Number of threads (per producer)") //
+        ("num-producers,n", po::value<int>(&args.numProducers)->default_value(1),
+         "Number of producers (per topic)")  //
 
-    ("service-url,u", po::value<std::string>(&args.serviceURL)->default_value(defaultServiceUrl),
-     "Pulsar Service URL")  //
+        ("num-threads-per-producers", po::value<int>(&args.numOfThreadsPerProducer)->default_value(1),
+         "Number of threads (per producer)")  //
 
-    ("producer-queue-size,p", po::value<int>(&args.producerQueueSize)->default_value(1000),
-     "Max size of producer pending messages queue")  //
+        ("service-url,u", po::value<std::string>(&args.serviceURL)->default_value(defaultServiceUrl),
+         "Pulsar Service URL")  //
 
-    ("io-threads,i", po::value<int>(&args.ioThreads)->default_value(1),
-     "Number of IO threads to use")  //
+        ("producer-queue-size,p", po::value<int>(&args.producerQueueSize)->default_value(1000),
+         "Max size of producer pending messages queue")  //
 
-    ("listener-threads,l", po::value<int>(&args.listenerThreads)->default_value(1),
-     "Number of listener threads") //
+        ("io-threads,i", po::value<int>(&args.ioThreads)->default_value(1),
+         "Number of IO threads to use")  //
 
-    ("sampling-period", po::value<long>(&args.samplingPeriod)->default_value(20),
-     "Time elapsed in seconds before reading are aggregated. Default: 20 sec") //
+        ("listener-threads,l", po::value<int>(&args.listenerThreads)->default_value(1),
+         "Number of listener threads")  //
 
-    ("num-of-samples", po::value<long>(&args.numberOfSamples)->default_value(0),
-     "Number of samples to take. Default: 0 (run forever)") //
+        ("sampling-period", po::value<long>(&args.samplingPeriod)->default_value(20),
+         "Time elapsed in seconds before reading are aggregated. Default: 20 sec")  //
 
-    ("batch-size", po::value<unsigned int>(&args.batchingMaxMessages)->default_value(1),
-            "If batch size == 1 then batching is disabled. Default batch size == 1") //
+        ("num-of-samples", po::value<long>(&args.numberOfSamples)->default_value(0),
+         "Number of samples to take. Default: 0 (run forever)")  //
 
-    ("compression", po::value<std::string>(&args.compression)->default_value(""),
-             "Compression can be either 'zlib' or 'lz4'. Default is no compression") //
+        ("batch-size", po::value<unsigned int>(&args.batchingMaxMessages)->default_value(1),
+         "If batch size == 1 then batching is disabled. Default batch size == 1")  //
 
-    ("max-batch-size-in-bytes", po::value<long>(&args.batchingMaxAllowedSizeInBytes)->default_value(128 * 1024),
-            "Use only is batch-size > 1, Default is 128 KB") //
+        ("compression", po::value<std::string>(&args.compression)->default_value(""),
+         "Compression can be either 'zlib' or 'lz4'. Default is no compression")  //
 
-    ("max-batch-publish-delay-in-ms", po::value<long>(&args.batchingMaxPublishDelayMs)->default_value(3000),
-            "Use only is batch-size > 1, Default is 3 seconds") //
+        ("max-batch-size-in-bytes",
+         po::value<long>(&args.batchingMaxAllowedSizeInBytes)->default_value(128 * 1024),
+         "Use only is batch-size > 1, Default is 128 KB")  //
 
-    ("encryption-key-name,k", po::value<std::string>(&args.encKeyName)->default_value(""), "The public key name to encrypt payload") //
+        ("max-batch-publish-delay-in-ms",
+         po::value<long>(&args.batchingMaxPublishDelayMs)->default_value(3000),
+         "Use only is batch-size > 1, Default is 3 seconds")  //
 
-    ("encryption-key-value-file,f", po::value<std::string>(&args.encKeyValueFile)->default_value(""),
-            "The file which contains the public key to encrypt payload"); //
+        ("pool-connections", po::value<bool>(&args.poolConnections)->default_value(false),
+         "whether pool connections used")  //
+
+        ("encryption-key-name,k", po::value<std::string>(&args.encKeyName)->default_value(""),
+         "The public key name to encrypt payload")  //
+
+        ("encryption-key-value-file,f", po::value<std::string>(&args.encKeyValueFile)->default_value(""),
+         "The file which contains the public key to encrypt payload");  //
 
     po::options_description hidden;
     hidden.add_options()("topic", po::value<std::string>(&args.topic), "Topic name");
@@ -285,9 +299,7 @@ int main(int argc, char** argv) {
 
     po::variables_map map;
     try {
-        po::store(
-                po::command_line_parser(argc, argv).options(allOptions).positional(positional).run(),
-                map);
+        po::store(po::command_line_parser(argc, argv).options(allOptions).positional(positional).run(), map);
         po::notify(map);
     } catch (const std::exception& e) {
         std::cerr << "Error parsing parameters -- " << e.what() << std::endl << std::endl;
@@ -301,8 +313,8 @@ int main(int argc, char** argv) {
     }
 
     if (map.count("topic") != 1) {
-        std::cerr << "Need to specify a topic name. eg: persistent://prop/cluster/ns/my-topic"
-                  << std::endl << std::endl;
+        std::cerr << "Need to specify a topic name. eg: persistent://prop/cluster/ns/my-topic" << std::endl
+                  << std::endl;
         std::cerr << desc << std::endl;
         return -1;
     }
@@ -322,7 +334,8 @@ int main(int argc, char** argv) {
         } else if (it->second.value().type() == typeid(unsigned int)) {
             LOG_INFO(it->first << ": " << it->second.as<unsigned int>());
         } else {
-            LOG_INFO(it->first << ": " << "new data type used, please create an else condition in the code");
+            LOG_INFO(it->first << ": "
+                               << "new data type used, please create an else condition in the code");
         }
     }
 
@@ -353,7 +366,11 @@ int main(int argc, char** argv) {
         producerConf.setCryptoKeyReader(keyReader);
     }
 
+    // Enable round robin message routing if it is a partitioned topic
+    producerConf.setPartitionsRoutingMode(ProducerConfiguration::RoundRobinDistribution);
+
     pulsar::ClientConfiguration conf;
+    conf.setMemoryLimit(args.memoryLimitMb * 1024 * 1024);
     conf.setUseTls(args.isUseTls);
     conf.setTlsAllowInsecureConnection(args.isTlsAllowInsecureConnection);
     if (!args.tlsTrustCertsFilePath.empty()) {
@@ -362,14 +379,14 @@ int main(int argc, char** argv) {
     }
     conf.setIOThreads(args.ioThreads);
     conf.setMessageListenerThreads(args.listenerThreads);
-    if(!args.authPlugin.empty()) {
+    if (!args.authPlugin.empty()) {
         pulsar::AuthenticationPtr auth = pulsar::AuthFactory::create(args.authPlugin, args.authParams);
         conf.setAuth(auth);
     }
 
-    pulsar::Client client(pulsar::PulsarFriend::getClient(args.serviceURL, conf, false));
+    pulsar::Client client(pulsar::PulsarFriend::getClient(args.serviceURL, conf, args.poolConnections));
 
-    std::atomic<bool> exitCondition;
+    std::atomic<bool> exitCondition(false);
     startPerfProducer(args, producerConf, client, exitCondition);
 
     Clock::time_point oldTime = Clock::now();
@@ -394,7 +411,8 @@ int main(int argc, char** argv) {
         lock.unlock();
 
         LOG_INFO("Throughput produced: " << rate << "  msg/s --- " << throughput << " Mbit/s --- "  //
-               << "Lat avg: " << latencyAvgMs << " ms -- Lat 99pct: " << latency99pctMs << " ms");
+                                         << "Lat avg: " << latencyAvgMs
+                                         << " ms -- Lat 99pct: " << latency99pctMs << " ms");
         oldTime = now;
     }
     LOG_INFO("Total messagesProduced = " << totalMessagesProduced + messagesProduced);

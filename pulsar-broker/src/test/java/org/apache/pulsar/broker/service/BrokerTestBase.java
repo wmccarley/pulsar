@@ -19,6 +19,7 @@
 package org.apache.pulsar.broker.service;
 
 import org.apache.pulsar.broker.PulsarService;
+import org.apache.pulsar.broker.ServiceConfiguration;
 import org.apache.pulsar.broker.auth.MockedPulsarServiceBaseTest;
 import org.apache.pulsar.common.policies.data.ClusterData;
 import org.apache.pulsar.common.policies.data.TenantInfo;
@@ -27,8 +28,8 @@ import org.slf4j.LoggerFactory;
 
 import com.google.common.collect.Sets;
 
-/**
- */
+import java.util.Random;
+
 public abstract class BrokerTestBase extends MockedPulsarServiceBaseTest {
     protected static final int ASYNC_EVENT_COMPLETION_WAIT = 100;
 
@@ -38,6 +39,15 @@ public abstract class BrokerTestBase extends MockedPulsarServiceBaseTest {
 
     public void baseSetup() throws Exception {
         super.internalSetup();
+        baseSetupCommon();
+    }
+
+    public void baseSetup(ServiceConfiguration serviceConfiguration) throws Exception {
+        super.internalSetup(serviceConfiguration);
+        baseSetupCommon();
+    }
+
+    private void baseSetupCommon() throws Exception {
         admin.clusters().createCluster("test", new ClusterData(brokerUrl.toString()));
         admin.tenants().createTenant("prop",
                 new TenantInfo(Sets.newHashSet("appid1"), Sets.newHashSet("test")));
@@ -55,7 +65,12 @@ public abstract class BrokerTestBase extends MockedPulsarServiceBaseTest {
 
     void runGC() {
         try {
-            pulsar.getExecutor().submit(() -> pulsar.getBrokerService().checkGC(0)).get();
+            pulsar.getBrokerService().forEachTopic(topic -> {
+                if (topic instanceof AbstractTopic) {
+                    ((AbstractTopic) topic).getInactiveTopicPolicies().setMaxInactiveDurationSeconds(0);
+                }
+            });
+            pulsar.getExecutor().submit(() -> pulsar.getBrokerService().checkGC()).get();
             Thread.sleep(ASYNC_EVENT_COMPLETION_WAIT);
         } catch (Exception e) {
             LOG.error("GC executor error", e);
@@ -69,6 +84,12 @@ public abstract class BrokerTestBase extends MockedPulsarServiceBaseTest {
         } catch (Exception e) {
             LOG.error("Error running message expiry check", e);
         }
+    }
+
+    private static final Random random = new Random();
+
+    protected String newTopicName() {
+        return "prop/ns-abc/topic-" + Long.toHexString(random.nextLong());
     }
 
     private static final Logger LOG = LoggerFactory.getLogger(BrokerTestBase.class);

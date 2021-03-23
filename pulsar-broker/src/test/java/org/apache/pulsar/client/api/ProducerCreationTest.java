@@ -27,6 +27,7 @@ import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
+@Test(groups = "broker-api")
 public class ProducerCreationTest extends ProducerConsumerBase {
 
     @BeforeMethod
@@ -36,7 +37,7 @@ public class ProducerCreationTest extends ProducerConsumerBase {
         super.producerBaseSetup();
     }
 
-    @AfterMethod
+    @AfterMethod(alwaysRun = true)
     @Override
     protected void cleanup() throws Exception {
         super.internalCleanup();
@@ -86,7 +87,7 @@ public class ProducerCreationTest extends ProducerConsumerBase {
         //simulate create producer timeout.
         Thread.sleep(3000);
 
-        producer.getConnectionHandler().connectionClosed(producer.getConnectionHandler().getClientCnx());
+        producer.getConnectionHandler().connectionClosed(producer.getConnectionHandler().cnx());
         Assert.assertFalse(producer.isConnected());
         Thread.sleep(3000);
         Assert.assertEquals(producer.getConnectionHandler().getEpoch(), 1);

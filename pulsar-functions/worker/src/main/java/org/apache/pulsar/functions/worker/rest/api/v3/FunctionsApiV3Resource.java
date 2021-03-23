@@ -29,8 +29,9 @@ import org.apache.pulsar.common.functions.UpdateOptions;
 import org.apache.pulsar.common.io.ConnectorDefinition;
 import org.apache.pulsar.common.policies.data.FunctionStats;
 import org.apache.pulsar.common.policies.data.FunctionStatus;
+import org.apache.pulsar.functions.worker.WorkerService;
 import org.apache.pulsar.functions.worker.rest.FunctionApiResource;
-import org.apache.pulsar.functions.worker.rest.api.FunctionsImpl;
+import org.apache.pulsar.functions.worker.service.api.Functions;
 import org.glassfish.jersey.media.multipart.FormDataContentDisposition;
 import org.glassfish.jersey.media.multipart.FormDataParam;
 
@@ -51,12 +52,12 @@ import java.util.List;
 
 @Slf4j
 @Path("/functions")
+@Produces(MediaType.APPLICATION_JSON)
+@Consumes(MediaType.APPLICATION_JSON)
 public class FunctionsApiV3Resource extends FunctionApiResource {
 
-    protected final FunctionsImpl functions;
-
-    public FunctionsApiV3Resource() {
-        this.functions = new FunctionsImpl(this);
+    Functions<? extends WorkerService> functions() {
+        return get().getFunctions();
     }
 
     @POST
@@ -70,7 +71,7 @@ public class FunctionsApiV3Resource extends FunctionApiResource {
                                  final @FormDataParam("url") String functionPkgUrl,
                                  final @FormDataParam("functionConfig") FunctionConfig functionConfig) {
 
-        functions.registerFunction(tenant, namespace, functionName, uploadedInputStream, fileDetail,
+        functions().registerFunction(tenant, namespace, functionName, uploadedInputStream, fileDetail,
                 functionPkgUrl, functionConfig, clientAppId(), clientAuthData());
 
     }
@@ -87,7 +88,7 @@ public class FunctionsApiV3Resource extends FunctionApiResource {
                                final @FormDataParam("functionConfig") FunctionConfig functionConfig,
                                final @FormDataParam("updateOptions") UpdateOptions updateOptions) {
 
-        functions.updateFunction(tenant, namespace, functionName, uploadedInputStream, fileDetail,
+        functions().updateFunction(tenant, namespace, functionName, uploadedInputStream, fileDetail,
                 functionPkgUrl, functionConfig, clientAppId(), clientAuthData(), updateOptions);
 
     }
@@ -97,7 +98,7 @@ public class FunctionsApiV3Resource extends FunctionApiResource {
     public void deregisterFunction(final @PathParam("tenant") String tenant,
                                    final @PathParam("namespace") String namespace,
                                    final @PathParam("functionName") String functionName) {
-        functions.deregisterFunction(tenant, namespace, functionName, clientAppId(), clientAuthData());
+        functions().deregisterFunction(tenant, namespace, functionName, clientAppId(), clientAuthData());
     }
 
     @GET
@@ -105,7 +106,15 @@ public class FunctionsApiV3Resource extends FunctionApiResource {
     public FunctionConfig getFunctionInfo(final @PathParam("tenant") String tenant,
                                           final @PathParam("namespace") String namespace,
                                           final @PathParam("functionName") String functionName) {
-        return functions.getFunctionInfo(tenant, namespace, functionName, clientAppId(), clientAuthData());
+        return functions().getFunctionInfo(tenant, namespace, functionName, clientAppId(), clientAuthData());
+    }
+
+    @GET
+    @Produces(MediaType.APPLICATION_JSON)
+    @Path("/{tenant}/{namespace}")
+    public List<String> listFunctions(final @PathParam("tenant") String tenant,
+                                    final @PathParam("namespace") String namespace) {
+        return functions().listFunctions(tenant, namespace, clientAppId(), clientAuthData());
     }
 
     @GET
@@ -114,6 +123,7 @@ public class FunctionsApiV3Resource extends FunctionApiResource {
             response = FunctionStatus.FunctionInstanceStatus.FunctionInstanceStatusData.class
     )
     @ApiResponses(value = {
+            @ApiResponse(code = 307, message = "Current broker doesn't serve the namespace of this function"),
             @ApiResponse(code = 400, message = "Invalid request"),
             @ApiResponse(code = 403, message = "The requester doesn't have admin permissions"),
             @ApiResponse(code = 404, message = "The function doesn't exist")
@@ -125,7 +135,7 @@ public class FunctionsApiV3Resource extends FunctionApiResource {
             final @PathParam("namespace") String namespace,
             final @PathParam("functionName") String functionName,
             final @PathParam("instanceId") String instanceId) throws IOException {
-        return functions.getFunctionInstanceStatus(
+        return functions().getFunctionInstanceStatus(
                 tenant, namespace, functionName, instanceId, uri.getRequestUri(), clientAppId(), clientAuthData());
     }
 
@@ -135,6 +145,7 @@ public class FunctionsApiV3Resource extends FunctionApiResource {
             response = FunctionStatus.class
     )
     @ApiResponses(value = {
+            @ApiResponse(code = 307, message = "Current broker doesn't serve the namespace of this function"),
             @ApiResponse(code = 400, message = "Invalid request"),
             @ApiResponse(code = 403, message = "The requester doesn't have admin permissions"),
             @ApiResponse(code = 404, message = "The function doesn't exist")
@@ -145,7 +156,7 @@ public class FunctionsApiV3Resource extends FunctionApiResource {
             final @PathParam("tenant") String tenant,
             final @PathParam("namespace") String namespace,
             final @PathParam("functionName") String functionName) throws IOException {
-        return functions.getFunctionStatus(
+        return functions().getFunctionStatus(
                 tenant, namespace, functionName, uri.getRequestUri(), clientAppId(), clientAuthData());
     }
 
@@ -155,6 +166,7 @@ public class FunctionsApiV3Resource extends FunctionApiResource {
             response = FunctionStats.class
     )
     @ApiResponses(value = {
+            @ApiResponse(code = 307, message = "Current broker doesn't serve the namespace of this function"),
             @ApiResponse(code = 400, message = "Invalid request"),
             @ApiResponse(code = 403, message = "The requester doesn't have admin permissions"),
             @ApiResponse(code = 404, message = "The function doesn't exist")
@@ -164,7 +176,7 @@ public class FunctionsApiV3Resource extends FunctionApiResource {
     public FunctionStats getFunctionStats(final @PathParam("tenant") String tenant,
                                           final @PathParam("namespace") String namespace,
                                           final @PathParam("functionName") String functionName) throws IOException {
-        return functions.getFunctionStats(tenant, namespace, functionName, uri.getRequestUri(), clientAppId(), clientAuthData());
+        return functions().getFunctionStats(tenant, namespace, functionName, uri.getRequestUri(), clientAppId(), clientAuthData());
     }
 
     @GET
@@ -173,6 +185,7 @@ public class FunctionsApiV3Resource extends FunctionApiResource {
             response = FunctionStats.FunctionInstanceStats.FunctionInstanceStatsData.class
     )
     @ApiResponses(value = {
+            @ApiResponse(code = 307, message = "Current broker doesn't serve the namespace of this function"),
             @ApiResponse(code = 400, message = "Invalid request"),
             @ApiResponse(code = 403, message = "The requester doesn't have admin permissions"),
             @ApiResponse(code = 404, message = "The function doesn't exist")
@@ -184,7 +197,7 @@ public class FunctionsApiV3Resource extends FunctionApiResource {
             final @PathParam("namespace") String namespace,
             final @PathParam("functionName") String functionName,
             final @PathParam("instanceId") String instanceId) throws IOException {
-        return functions.getFunctionsInstanceStats(
+        return functions().getFunctionsInstanceStats(
                 tenant, namespace, functionName, instanceId, uri.getRequestUri(), clientAppId(), clientAuthData());
     }
 
@@ -197,12 +210,13 @@ public class FunctionsApiV3Resource extends FunctionApiResource {
                                   final @FormDataParam("data") String input,
                                   final @FormDataParam("dataStream") InputStream uploadedInputStream,
                                   final @FormDataParam("topic") String topic) {
-        return functions.triggerFunction(tenant, namespace, functionName, input, uploadedInputStream, topic, clientAppId(), clientAuthData());
+        return functions().triggerFunction(tenant, namespace, functionName, input, uploadedInputStream, topic, clientAppId(), clientAuthData());
     }
 
     @POST
     @ApiOperation(value = "Restart function instance", response = Void.class)
     @ApiResponses(value = {
+            @ApiResponse(code = 307, message = "Current broker doesn't serve the namespace of this function"),
             @ApiResponse(code = 400, message = "Invalid request"),
             @ApiResponse(code = 404, message = "The function does not exist"),
             @ApiResponse(code = 500, message = "Internal server error")
@@ -213,7 +227,7 @@ public class FunctionsApiV3Resource extends FunctionApiResource {
                                 final @PathParam("namespace") String namespace,
                                 final @PathParam("functionName") String functionName,
                                 final @PathParam("instanceId") String instanceId) {
-        functions.restartFunctionInstance(tenant, namespace, functionName, instanceId, this.uri.getRequestUri(), clientAppId(), clientAuthData());
+        functions().restartFunctionInstance(tenant, namespace, functionName, instanceId, this.uri.getRequestUri(), clientAppId(), clientAuthData());
     }
 
     @POST
@@ -228,7 +242,7 @@ public class FunctionsApiV3Resource extends FunctionApiResource {
     public void restartFunction(final @PathParam("tenant") String tenant,
                                 final @PathParam("namespace") String namespace,
                                 final @PathParam("functionName") String functionName) {
-        functions.restartFunctionInstances(tenant, namespace, functionName, clientAppId(), clientAuthData());
+        functions().restartFunctionInstances(tenant, namespace, functionName, clientAppId(), clientAuthData());
     }
 
     @POST
@@ -244,7 +258,7 @@ public class FunctionsApiV3Resource extends FunctionApiResource {
                              final @PathParam("namespace") String namespace,
                              final @PathParam("functionName") String functionName,
                              final @PathParam("instanceId") String instanceId) {
-        functions.stopFunctionInstance(tenant, namespace, functionName, instanceId, this.uri.getRequestUri(), clientAppId(), clientAuthData());
+        functions().stopFunctionInstance(tenant, namespace, functionName, instanceId, this.uri.getRequestUri(), clientAppId(), clientAuthData());
     }
 
     @POST
@@ -259,7 +273,7 @@ public class FunctionsApiV3Resource extends FunctionApiResource {
     public void stopFunction(final @PathParam("tenant") String tenant,
                              final @PathParam("namespace") String namespace,
                              final @PathParam("functionName") String functionName) {
-        functions.stopFunctionInstances(tenant, namespace, functionName, clientAppId(), clientAuthData());
+        functions().stopFunctionInstances(tenant, namespace, functionName, clientAppId(), clientAuthData());
     }
 
     @POST
@@ -275,7 +289,7 @@ public class FunctionsApiV3Resource extends FunctionApiResource {
                               final @PathParam("namespace") String namespace,
                               final @PathParam("functionName") String functionName,
                               final @PathParam("instanceId") String instanceId) {
-        functions.startFunctionInstance(tenant, namespace, functionName, instanceId, this.uri.getRequestUri(), clientAppId(), clientAuthData());
+        functions().startFunctionInstance(tenant, namespace, functionName, instanceId, this.uri.getRequestUri(), clientAppId(), clientAuthData());
     }
 
     @POST
@@ -290,7 +304,7 @@ public class FunctionsApiV3Resource extends FunctionApiResource {
     public void startFunction(final @PathParam("tenant") String tenant,
                               final @PathParam("namespace") String namespace,
                               final @PathParam("functionName") String functionName) {
-        functions.startFunctionInstances(tenant, namespace, functionName, clientAppId(), clientAuthData());
+        functions().startFunctionInstances(tenant, namespace, functionName, clientAppId(), clientAuthData());
     }
 
     @POST
@@ -298,13 +312,13 @@ public class FunctionsApiV3Resource extends FunctionApiResource {
     @Consumes(MediaType.MULTIPART_FORM_DATA)
     public void uploadFunction(final @FormDataParam("data") InputStream uploadedInputStream,
                                final @FormDataParam("path") String path) {
-        functions.uploadFunction(uploadedInputStream, path, clientAppId());
+        functions().uploadFunction(uploadedInputStream, path, clientAppId());
     }
 
     @GET
     @Path("/download")
     public StreamingOutput downloadFunction(final @QueryParam("path") String path) {
-        return functions.downloadFunction(path, clientAppId(), clientAuthData());
+        return functions().downloadFunction(path, clientAppId(), clientAuthData());
     }
 
     @GET
@@ -321,7 +335,7 @@ public class FunctionsApiV3Resource extends FunctionApiResource {
             @ApiParam(value = "The name of functions")
             final @PathParam("functionName") String functionName) {
 
-        return functions.downloadFunction(tenant, namespace, functionName, clientAppId(), clientAuthData());
+        return functions().downloadFunction(tenant, namespace, functionName, clientAppId(), clientAuthData());
     }
 
     @GET
@@ -331,7 +345,7 @@ public class FunctionsApiV3Resource extends FunctionApiResource {
      */
     @Deprecated
     public List<ConnectorDefinition> getConnectorsList() throws IOException {
-        return functions.getListOfConnectors();
+        return functions().getListOfConnectors();
     }
 
     @GET
@@ -340,7 +354,7 @@ public class FunctionsApiV3Resource extends FunctionApiResource {
                                           final @PathParam("namespace") String namespace,
                                           final @PathParam("functionName") String functionName,
                                           final @PathParam("key") String key) throws IOException {
-        return functions.getFunctionState(tenant, namespace, functionName, key, clientAppId(), clientAuthData());
+        return functions().getFunctionState(tenant, namespace, functionName, key, clientAppId(), clientAuthData());
     }
 
     @POST
@@ -351,6 +365,27 @@ public class FunctionsApiV3Resource extends FunctionApiResource {
                                  final @PathParam("functionName") String functionName,
                                  final @PathParam("key") String key,
                                  final @FormDataParam("state") FunctionState stateJson) throws IOException {
-        functions.putFunctionState(tenant, namespace, functionName, key, stateJson, clientAppId(), clientAuthData());
+        functions().putFunctionState(tenant, namespace, functionName, key, stateJson, clientAppId(), clientAuthData());
+    }
+
+    @PUT
+    @ApiOperation(value = "Updates a Pulsar Function on the worker leader", hidden = true)
+    @ApiResponses(value = {
+            @ApiResponse(code = 403, message = "The requester doesn't have super-user permissions"),
+            @ApiResponse(code = 404, message = "The function does not exist"),
+            @ApiResponse(code = 400, message = "Invalid request"),
+            @ApiResponse(code = 307, message = "Redirecting to the worker leader"),
+            @ApiResponse(code = 200, message = "Pulsar Function successfully updated")
+    })
+    @Path("/leader/{tenant}/{namespace}/{functionName}")
+    @Consumes(MediaType.MULTIPART_FORM_DATA)
+    public void updateFunctionOnWorkerLeader(final @PathParam("tenant") String tenant,
+                                                 final @PathParam("namespace") String namespace,
+                                                 final @PathParam("functionName") String functionName,
+                                                 final @FormDataParam("functionMetaData") InputStream uploadedInputStream,
+                                                 final @FormDataParam("delete") boolean delete) {
+
+        functions().updateFunctionOnWorkerLeader(tenant, namespace, functionName, uploadedInputStream,
+                delete, uri.getRequestUri(), clientAppId());
     }
 }

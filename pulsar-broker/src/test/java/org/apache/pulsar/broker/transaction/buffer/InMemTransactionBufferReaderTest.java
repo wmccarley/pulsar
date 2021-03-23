@@ -35,12 +35,13 @@ import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
 import org.apache.pulsar.broker.transaction.buffer.exceptions.EndOfTransactionException;
 import org.apache.pulsar.broker.transaction.buffer.impl.InMemTransactionBufferReader;
-import org.apache.pulsar.transaction.impl.common.TxnID;
+import org.apache.pulsar.client.api.transaction.TxnID;
 import org.testng.annotations.Test;
 
 /**
  * Unit test {@link InMemTransactionBufferReader}.
  */
+@Test(groups = "broker")
 public class InMemTransactionBufferReaderTest {
 
     private final TxnID txnID = new TxnID(1234L, 5678L);
@@ -67,7 +68,7 @@ public class InMemTransactionBufferReaderTest {
         SortedMap<Long, ByteBuf> entries = new TreeMap<>();
         final int numEntries = 100;
         for (int i = 0; i < numEntries; i++) {
-            entries.put(Long.valueOf(i), Unpooled.copiedBuffer("message-" + i, UTF_8));
+            entries.put((long) i, Unpooled.copiedBuffer("message-" + i, UTF_8));
         }
 
         try (InMemTransactionBufferReader reader = new InMemTransactionBufferReader(
@@ -93,7 +94,7 @@ public class InMemTransactionBufferReaderTest {
         SortedMap<Long, ByteBuf> entries = new TreeMap<>();
         final int numEntries = 100;
         for (int i = 0; i < numEntries; i++) {
-            entries.put(Long.valueOf(i), Unpooled.copiedBuffer("message-" + i, UTF_8));
+            entries.put((long) i, Unpooled.copiedBuffer("message-" + i, UTF_8));
         }
 
         try (InMemTransactionBufferReader reader = new InMemTransactionBufferReader(
@@ -132,7 +133,7 @@ public class InMemTransactionBufferReaderTest {
                 assertEquals(txnEntry.txnId(), txnID);
                 assertEquals(txnEntry.sequenceId(), startSequenceId + i);
                 assertEquals(new String(
-                    ByteBufUtil.getBytes(txnEntry.getEntryBuffer()),
+                    ByteBufUtil.getBytes(txnEntry.getEntry().getDataBuffer()),
                     UTF_8
                 ), "message-" + i);
             }

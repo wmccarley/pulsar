@@ -18,6 +18,7 @@
  */
 #ifndef PULSAR_MULTI_TOPICS_CONSUMER_HEADER
 #define PULSAR_MULTI_TOPICS_CONSUMER_HEADER
+#include "lib/TestUtil.h"
 #include "ConsumerImpl.h"
 #include "ClientImpl.h"
 #include "BlockingQueue.h"
@@ -69,6 +70,7 @@ class MultiTopicsConsumerImpl : public ConsumerImplBase,
     virtual Result pauseMessageListener();
     virtual Result resumeMessageListener();
     virtual void redeliverUnacknowledgedMessages();
+    virtual void redeliverUnacknowledgedMessages(const std::set<MessageId>& messageIds);
     virtual int getNumOfPrefetchedMessages() const;
     virtual void getBrokerConsumerStatsAsync(BrokerConsumerStatsCallback callback);
     void handleGetConsumerStats(Result, BrokerConsumerStats, LatchPtr, MultiTopicsBrokerConsumerStatsPtr,
@@ -88,7 +90,6 @@ class MultiTopicsConsumerImpl : public ConsumerImplBase,
     const std::string subscriptionName_;
     std::string consumerStr_;
     std::string topic_;
-    NamespaceNamePtr namespaceName_;
     const ConsumerConfiguration conf_;
     typedef std::map<std::string, ConsumerImplPtr> ConsumerMap;
     ConsumerMap consumers_;
@@ -102,7 +103,7 @@ class MultiTopicsConsumerImpl : public ConsumerImplBase,
     ExecutorServicePtr listenerExecutor_;
     MessageListener messageListener_;
     Promise<Result, ConsumerImplBaseWeakPtr> multiTopicsConsumerCreatedPromise_;
-    UnAckedMessageTrackerScopedPtr unAckedMessageTrackerPtr_;
+    UnAckedMessageTrackerPtr unAckedMessageTrackerPtr_;
     const std::vector<std::string>& topics_;
     std::queue<ReceiveCallback> pendingReceives_;
 
@@ -133,7 +134,13 @@ class MultiTopicsConsumerImpl : public ConsumerImplBase,
     void handleOneTopicUnsubscribedAsync(Result result, std::shared_ptr<std::atomic<int>> consumerUnsubed,
                                          int numberPartitions, TopicNamePtr topicNamePtr,
                                          std::string& topicPartitionName, ResultCallback callback);
+
+   private:
+    virtual void setNegativeAcknowledgeEnabledForTesting(bool enabled);
+
+    FRIEND_TEST(ConsumerTest, testMultiTopicsConsumerUnAckedMessageRedelivery);
 };
 
+typedef std::shared_ptr<MultiTopicsConsumerImpl> MultiTopicsConsumerImplPtr;
 }  // namespace pulsar
 #endif  // PULSAR_MULTI_TOPICS_CONSUMER_HEADER

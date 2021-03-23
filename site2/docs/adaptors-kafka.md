@@ -103,13 +103,13 @@ while (true) {
 ## Complete Examples
 
 You can find the complete producer and consumer examples
-[here](https://github.com/apache/pulsar/tree/master/pulsar-client-kafka-compat/pulsar-client-kafka-tests/src/test/java/org/apache/pulsar/client/kafka/compat/examples).
+[here](https://github.com/apache/pulsar-adapters/tree/master/pulsar-client-kafka-compat/pulsar-client-kafka-tests/src/test/java/org/apache/pulsar/client/kafka/compat/examples).
 
 ## Compatibility matrix
 
 Currently the Pulsar Kafka wrapper supports most of the operations offered by the Kafka API.
 
-#### Producer
+### Producer
 
 APIs:
 
@@ -128,7 +128,7 @@ Properties:
 | Config property                         | Supported | Notes                                                                         |
 |:----------------------------------------|:----------|:------------------------------------------------------------------------------|
 | `acks`                                  | Ignored   | Durability and quorum writes are configured at the namespace level            |
-| `auto.offset.reset`                     | Yes       | Will have a default value of `latest` if user does not give specific setting. |
+| `auto.offset.reset`                     | Yes       | It uses a default value of `earliest` if you do not give a specific setting. |
 | `batch.size`                            | Ignored   |                                                                               |
 | `bootstrap.servers`                     | Yes       |                                 |
 | `buffer.memory`                         | Ignored   |                                                                               |
@@ -154,7 +154,7 @@ Properties:
 | `value.serializer`                      | Yes       |                                                                               |
 
 
-#### Consumer
+### Consumer
 
 The following table lists consumer APIs.
 
@@ -250,6 +250,7 @@ You can configure Pulsar authentication provider directly from the Kafka propert
 | [`pulsar.producer.max.pending.messages.across.partitions`](http://pulsar.apache.org/api/client/org/apache/pulsar/client/api/ProducerConfiguration.html#setMaxPendingMessagesAcrossPartitions-int-) | `50000` | Set the maximum number of pending messages across all the partitions.  |
 | [`pulsar.producer.batching.enabled`](http://pulsar.apache.org/api/client/org/apache/pulsar/client/api/ProducerConfiguration.html#setBatchingEnabled-boolean-) | `true` | Control whether automatic batching of messages is enabled for the producer. |
 | [`pulsar.producer.batching.max.messages`](http://pulsar.apache.org/api/client/org/apache/pulsar/client/api/ProducerConfiguration.html#setBatchingMaxMessages-int-) | `1000` | The maximum number of messages in a batch. |
+| [`pulsar.block.if.producer.queue.full`](http://pulsar.apache.org/api/client/org/apache/pulsar/client/api/ProducerConfiguration.html#setBlockIfQueueFull-boolean-) | | Specify the block producer if queue  is full. |
 
 
 ### Pulsar consumer Properties

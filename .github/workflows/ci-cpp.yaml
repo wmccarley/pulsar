@@ -22,8 +22,12 @@ on:
   pull_request:
     branches:
       - master
-    paths-ignore:
-      - '**.md'
+  push:
+    branches:
+      - branch-*
+
+env:
+  MAVEN_OPTS: -Dhttp.keepAlive=false -Dmaven.wagon.http.pool=false -Dmaven.wagon.http.retryHandler.class=standard -Dmaven.wagon.http.retryHandler.count=3
 
 jobs:
 
@@ -33,29 +37,62 @@ jobs:
     timeout-minutes: 120
 
     steps:
+      - name: checkout
+        uses: actions/checkout@v2
+
+      - name: Changed files check
+        id:   changes
+        uses: apache/pulsar-test-infra/paths-filter@master
+        with:
+          filters: |
+            # pattern syntax: https://github.com/micromatch/picomatch
+            all:
+              - '**'
+            docs:
+              - 'site2/**'
+              - 'deployment/**'
+              - '.asf.yaml'
+              - '*.md'
+              - '**/*.md'
+
+      - name: Cache local Maven repository
+        if: ${{ steps.changes.outputs.all_count > steps.changes.outputs.docs_count }}
+        uses: actions/cache@v2
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}
+          restore-keys: |
+            ${{ runner.os }}-maven-
+
       - name: Set up JDK 1.8
         uses: actions/setup-java@v1
+        if: ${{ steps.changes.outputs.all_count > steps.changes.outputs.docs_count }}
         with:
           java-version: 1.8
 
-      - name: checkout
-        uses: actions/checkout@v1
+      - name: clean disk
+        if: ${{ steps.changes.outputs.all_count > steps.changes.outputs.docs_count }}
+        run: |
+          sudo swapoff -a
+          sudo rm -f /swapfile
+          sudo apt clean
+          docker rmi $(docker images -q) -f
+          df -h
 
-      - name: build pacakge
-        run: mvn -B -Dorg.slf4j.simpleLogger.defaultLogLevel=ERROR package -DskipTests
+      - name: Replace maven's wagon-http version
+        run: sudo ./build/replace_maven-wagon-http-version.sh
+
+      - name: build package
+        if: ${{ steps.changes.outputs.all_count > steps.changes.outputs.docs_count }}
+        run: mvn -B -ntp -q install -Pcore-modules -DskipTests
 
       - name: build cpp artifacts
+        if: ${{ steps.changes.outputs.all_count > steps.changes.outputs.docs_count }}
         run: |
           echo "Build C++ client library"
-          export CMAKE_ARGS="-DCMAKE_BUILD_TYPE=Debug -DBUILD_DYNAMIC_LIB=OFF"
+          export CMAKE_ARGS="-DCMAKE_BUILD_TYPE=Debug -DBUILD_DYNAMIC_LIB=OFF -DPYTHON_INCLUDE_DIR=/usr/include/python2.7 -DPYTHON_LIBRARY=/usr/lib/x86_64-linux-gnu/libpython2.7.so"
           pulsar-client-cpp/docker-build.sh
 
       - name: run c++ tests
+        if: ${{ steps.changes.outputs.all_count > steps.changes.outputs.docs_count }}
         run: pulsar-client-cpp/docker-tests.sh
-
-
-
-
-
-
-

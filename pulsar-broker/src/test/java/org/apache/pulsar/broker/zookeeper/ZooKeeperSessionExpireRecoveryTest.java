@@ -21,25 +21,27 @@ package org.apache.pulsar.broker.zookeeper;
 import static org.testng.Assert.assertTrue;
 import static org.testng.Assert.fail;
 
+import com.google.common.collect.Sets;
+
 import org.apache.pulsar.broker.auth.MockedPulsarServiceBaseTest;
 import org.apache.pulsar.client.admin.PulsarAdminException;
 import org.apache.pulsar.common.policies.data.ClusterData;
 import org.apache.zookeeper.KeeperException.Code;
-import org.testng.annotations.AfterClass;
-import org.testng.annotations.BeforeClass;
+import org.apache.zookeeper.MockZooKeeper;
+import org.testng.annotations.AfterMethod;
+import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
-import com.google.common.collect.Sets;
-
+@Test(groups = "broker")
 public class ZooKeeperSessionExpireRecoveryTest extends MockedPulsarServiceBaseTest {
 
-    @BeforeClass
+    @BeforeMethod(groups = "broker")
     @Override
     protected void setup() throws Exception {
         super.internalSetup();
     }
 
-    @AfterClass
+    @AfterMethod(alwaysRun = true)
     @Override
     protected void cleanup() throws Exception {
         super.internalCleanup();
@@ -54,7 +56,10 @@ public class ZooKeeperSessionExpireRecoveryTest extends MockedPulsarServiceBaseT
 
         assertTrue(Sets.newHashSet(admin.clusters().getClusters()).contains("my-cluster"));
 
-        mockZookKeeper.failNow(Code.SESSIONEXPIRED);
+        mockZooKeeperGlobal.failConditional(Code.SESSIONEXPIRED, (op, path) -> {
+                return op == MockZooKeeper.Op.CREATE
+                    && path.equals("/admin/clusters/my-cluster-2");
+            });
 
         assertTrue(Sets.newHashSet(admin.clusters().getClusters()).contains("my-cluster"));
 

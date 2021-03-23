@@ -20,10 +20,10 @@ package org.apache.pulsar.common.util.collections;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
-
-import com.google.common.collect.Lists;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 import java.util.concurrent.locks.StampedLock;
 import java.util.function.BiConsumer;
 import java.util.function.Function;
@@ -149,14 +149,14 @@ public class ConcurrentOpenHashMap<K, V> {
     }
 
     public void clear() {
-        for (Section<K, V> s : sections) {
-            s.clear();
+        for (int i = 0; i < sections.length; i++) {
+            sections[i].clear();
         }
     }
 
     public void forEach(BiConsumer<? super K, ? super V> processor) {
-        for (Section<K, V> s : sections) {
-            s.forEach(processor);
+        for (int i = 0; i < sections.length; i++) {
+            sections[i].forEach(processor);
         }
     }
 
@@ -164,13 +164,13 @@ public class ConcurrentOpenHashMap<K, V> {
      * @return a new list of all keys (makes a copy)
      */
     public List<K> keys() {
-        List<K> keys = Lists.newArrayList();
+        List<K> keys = new ArrayList<>((int) size());
         forEach((key, value) -> keys.add(key));
         return keys;
     }
 
     public List<V> values() {
-        List<V> values = Lists.newArrayList();
+        List<V> values = new ArrayList<>((int) size());
         forEach((key, value) -> values.add(value));
         return values;
     }
@@ -182,6 +182,8 @@ public class ConcurrentOpenHashMap<K, V> {
         private volatile Object[] table;
 
         private volatile int capacity;
+        private static final AtomicIntegerFieldUpdater<Section> SIZE_UPDATER =
+                AtomicIntegerFieldUpdater.newUpdater(Section.class, "size");
         private volatile int size;
         private int usedBuckets;
         private int resizeThreshold;
@@ -276,7 +278,7 @@ public class ConcurrentOpenHashMap<K, V> {
 
                         table[bucket] = key;
                         table[bucket + 1] = value;
-                        ++size;
+                        SIZE_UPDATER.incrementAndGet(this);
                         return valueProvider != null ? value : null;
                     } else if (storedKey == DeletedKey) {
                         // The bucket contained a different deleted key
@@ -310,7 +312,7 @@ public class ConcurrentOpenHashMap<K, V> {
                     V storedValue = (V) table[bucket + 1];
                     if (key.equals(storedKey)) {
                         if (value == null || value.equals(storedValue)) {
-                            --size;
+                            SIZE_UPDATER.decrementAndGet(this);
 
                             int nextInArray = (bucket + 2) & (table.length - 1);
                             if (table[nextInArray] == EmptyKey) {
@@ -352,42 +354,37 @@ public class ConcurrentOpenHashMap<K, V> {
         }
 
         public void forEach(BiConsumer<? super K, ? super V> processor) {
-            long stamp = tryOptimisticRead();
-
+            // Take a reference to the data table, if there is a rehashing event, we'll be
+            // simply iterating over a snapshot of the data.
             Object[] table = this.table;
-            boolean acquiredReadLock = false;
 
-            try {
-
-                // Validate no rehashing
-                if (!validate(stamp)) {
-                    // Fallback to read lock
-                    stamp = readLock();
-                    acquiredReadLock = true;
-                    table = this.table;
+            // Go through all the buckets for this section. We try to renew the stamp only after a validation
+            // error, otherwise we keep going with the same.
+            long stamp = 0;
+            for (int bucket = 0; bucket < table.length; bucket += 2) {
+                if (stamp == 0) {
+                    stamp = tryOptimisticRead();
                 }
 
-                // Go through all the buckets for this section
-                for (int bucket = 0; bucket < table.length; bucket += 2) {
-                    K storedKey = (K) table[bucket];
-                    V storedValue = (V) table[bucket + 1];
+                K storedKey = (K) table[bucket];
+                V storedValue = (V) table[bucket + 1];
 
-                    if (!acquiredReadLock && !validate(stamp)) {
-                        // Fallback to acquiring read lock
-                        stamp = readLock();
-                        acquiredReadLock = true;
+                if (!validate(stamp)) {
+                    // Fallback to acquiring read lock
+                    stamp = readLock();
 
+                    try {
                         storedKey = (K) table[bucket];
                         storedValue = (V) table[bucket + 1];
+                    } finally {
+                        unlockRead(stamp);
                     }
 
-                    if (storedKey != DeletedKey && storedKey != EmptyKey) {
-                        processor.accept(storedKey, storedValue);
-                    }
+                    stamp = 0;
                 }
-            } finally {
-                if (acquiredReadLock) {
-                    unlockRead(stamp);
+
+                if (storedKey != DeletedKey && storedKey != EmptyKey) {
+                    processor.accept(storedKey, storedValue);
                 }
             }
         }

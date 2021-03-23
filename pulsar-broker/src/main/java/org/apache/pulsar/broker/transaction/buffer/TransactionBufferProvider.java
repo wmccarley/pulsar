@@ -19,10 +19,10 @@
 package org.apache.pulsar.broker.transaction.buffer;
 
 import static com.google.common.base.Preconditions.checkArgument;
-
 import com.google.common.annotations.Beta;
 import java.io.IOException;
 import java.util.concurrent.CompletableFuture;
+import org.apache.pulsar.broker.service.Topic;
 
 /**
  * A provider that provides {@link TransactionBuffer}.
@@ -52,11 +52,11 @@ public interface TransactionBufferProvider {
     }
 
     /**
-     * Open the transaction buffer.
+     * Open the persistent transaction buffer.
      *
-     * @return a future represents the result of the operation.
-     *         an instance of {@link TransactionBuffer} is returned
-     *         if the operation succeeds.
+     * @param originTopic
+     * @param transactionBufferFuture the transaction buffer future
+     * @return
      */
-    CompletableFuture<TransactionBuffer> newTransactionBuffer();
+    TransactionBuffer newTransactionBuffer(Topic originTopic, CompletableFuture<Void> transactionBufferFuture);
 }

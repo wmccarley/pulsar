@@ -19,21 +19,19 @@
 package org.apache.pulsar.broker.web;
 
 import com.google.common.collect.Lists;
-
 import io.prometheus.client.jetty.JettyStatisticsCollector;
-
 import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.TimeZone;
-
 import javax.servlet.DispatcherType;
-
 import org.apache.pulsar.broker.PulsarServerException;
 import org.apache.pulsar.broker.PulsarService;
+import org.apache.pulsar.broker.ServiceConfiguration;
 import org.apache.pulsar.common.util.SecurityUtility;
+import org.apache.pulsar.common.util.keystoretls.KeyStoreSSLContext;
 import org.eclipse.jetty.server.Handler;
 import org.eclipse.jetty.server.Server;
 import org.eclipse.jetty.server.ServerConnector;
@@ -57,7 +55,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Web Service embedded into Pulsar
+ * Web Service embedded into Pulsar.
  */
 public class WebService implements AutoCloseable {
 
@@ -65,12 +63,12 @@ public class WebService implements AutoCloseable {
 
     public static final String ATTRIBUTE_PULSAR_NAME = "pulsar";
     public static final String HANDLER_CACHE_CONTROL = "max-age=3600";
-    public static final int MAX_CONCURRENT_REQUESTS = 1024; // make it configurable?
 
     private final PulsarService pulsar;
     private final Server server;
     private final List<Handler> handlers;
     private final WebExecutorThreadPool webServiceExecutor;
+    public final int maxConcurrentRequests;
 
     private final ServerConnector httpConnector;
     private final ServerConnector httpsConnector;
@@ -82,6 +80,7 @@ public class WebService implements AutoCloseable {
                 pulsar.getConfiguration().getNumHttpServerThreads(),
                 "pulsar-web");
         this.server = new Server(webServiceExecutor);
+        this.maxConcurrentRequests = pulsar.getConfiguration().getMaxConcurrentHttpRequests();
         List<ServerConnector> connectors = new ArrayList<>();
 
         Optional<Integer> port = pulsar.getConfiguration().getWebServicePort();
@@ -97,13 +96,30 @@ public class WebService implements AutoCloseable {
         Optional<Integer> tlsPort = pulsar.getConfiguration().getWebServicePortTls();
         if (tlsPort.isPresent()) {
             try {
-                SslContextFactory sslCtxFactory = SecurityUtility.createSslContextFactory(
-                        pulsar.getConfiguration().isTlsAllowInsecureConnection(),
-                        pulsar.getConfiguration().getTlsTrustCertsFilePath(),
-                        pulsar.getConfiguration().getTlsCertificateFilePath(),
-                        pulsar.getConfiguration().getTlsKeyFilePath(),
-                        pulsar.getConfiguration().isTlsRequireTrustedClientCertOnConnect(), true,
-                        pulsar.getConfiguration().getTlsCertRefreshCheckDurationSec());
+                SslContextFactory sslCtxFactory;
+                ServiceConfiguration config = pulsar.getConfiguration();
+                if (config.isTlsEnabledWithKeyStore()) {
+                    sslCtxFactory = KeyStoreSSLContext.createSslContextFactory(
+                            config.getTlsProvider(),
+                            config.getTlsKeyStoreType(),
+                            config.getTlsKeyStore(),
+                            config.getTlsKeyStorePassword(),
+                            config.isTlsAllowInsecureConnection(),
+                            config.getTlsTrustStoreType(),
+                            config.getTlsTrustStore(),
+                            config.getTlsTrustStorePassword(),
+                            config.isTlsRequireTrustedClientCertOnConnect(),
+                            config.getTlsCertRefreshCheckDurationSec()
+                    );
+                } else {
+                    sslCtxFactory = SecurityUtility.createSslContextFactory(
+                            config.isTlsAllowInsecureConnection(),
+                            config.getTlsTrustCertsFilePath(),
+                            config.getTlsCertificateFilePath(),
+                            config.getTlsKeyFilePath(),
+                            config.isTlsRequireTrustedClientCertOnConnect(), true,
+                            config.getTlsCertRefreshCheckDurationSec());
+                }
                 httpsConnector = new PulsarServerConnector(server, 1, 1, sslCtxFactory);
                 httpsConnector.setPort(tlsPort.get());
                 httpsConnector.setHost(pulsar.getBindAddress());
@@ -116,11 +132,12 @@ public class WebService implements AutoCloseable {
         }
 
         // Limit number of concurrent HTTP connections to avoid getting out of file descriptors
-        connectors.forEach(c -> c.setAcceptQueueSize(WebService.MAX_CONCURRENT_REQUESTS / connectors.size()));
+        connectors.forEach(c -> c.setAcceptQueueSize(maxConcurrentRequests / connectors.size()));
         server.setConnectors(connectors.toArray(new ServerConnector[connectors.size()]));
     }
 
-    public void addRestResources(String basePath, String javaPackages, boolean requiresAuthentication, Map<String,Object> attributeMap) {
+    public void addRestResources(String basePath, String javaPackages, boolean requiresAuthentication,
+                                 Map<String, Object> attributeMap) {
         ResourceConfig config = new ResourceConfig();
         config.packages("jersey.config.server.provider.packages", javaPackages);
         config.register(JsonMapperProvider.class);
@@ -130,7 +147,8 @@ public class WebService implements AutoCloseable {
         addServlet(basePath, servletHolder, requiresAuthentication, attributeMap);
     }
 
-    public void addServlet(String path, ServletHolder servletHolder, boolean requiresAuthentication, Map<String,Object> attributeMap) {
+    public void addServlet(String path, ServletHolder servletHolder, boolean requiresAuthentication,
+                           Map<String, Object> attributeMap) {
         ServletContextHandler context = new ServletContextHandler(ServletContextHandler.SESSIONS);
         context.setContextPath(path);
         context.addServlet(servletHolder, MATCH_ALL);
@@ -140,15 +158,34 @@ public class WebService implements AutoCloseable {
             });
         }
 
+        if (!pulsar.getConfig().getBrokerInterceptors().isEmpty()
+                || !pulsar.getConfig().isDisableBrokerInterceptors()) {
+            // Enable PreInterceptFilter only when interceptors are enabled
+            context.addFilter(new FilterHolder(new PreInterceptFilter(pulsar.getBrokerInterceptor())),
+                    MATCH_ALL, EnumSet.allOf(DispatcherType.class));
+        }
+
         if (requiresAuthentication && pulsar.getConfiguration().isAuthenticationEnabled()) {
             FilterHolder filter = new FilterHolder(new AuthenticationFilter(
-                                                           pulsar.getBrokerService().getAuthenticationService()));
+                    pulsar.getBrokerService().getAuthenticationService()));
             context.addFilter(filter, MATCH_ALL, EnumSet.allOf(DispatcherType.class));
+        }
+
+        if (pulsar.getConfiguration().isHttpRequestsLimitEnabled()) {
+            context.addFilter(
+                    new FilterHolder(new RateLimitingFilter(pulsar.getConfiguration().getHttpRequestsMaxPerSecond())),
+                    MATCH_ALL, EnumSet.allOf(DispatcherType.class));
+        }
+
+        if (pulsar.getConfig().getHttpMaxRequestSize() > 0) {
+            context.addFilter(new FilterHolder(
+                    new MaxRequestSizeFilter(
+                            pulsar.getConfig().getHttpMaxRequestSize())),
+                    MATCH_ALL, EnumSet.allOf(DispatcherType.class));
         }
 
         FilterHolder responseFilter = new FilterHolder(new ResponseHandlerFilter(pulsar));
         context.addFilter(responseFilter, MATCH_ALL, EnumSet.allOf(DispatcherType.class));
-
         handlers.add(context);
     }
 
@@ -191,7 +228,6 @@ public class WebService implements AutoCloseable {
             handlers.add(stats);
 
             server.setHandler(stats);
-
             server.start();
 
             if (httpConnector != null) {

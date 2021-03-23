@@ -28,6 +28,7 @@ import static org.testng.Assert.assertFalse;
 import java.lang.reflect.Method;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.Future;
@@ -40,16 +41,16 @@ import org.apache.bookkeeper.mledger.ManagedLedgerFactory;
 import org.apache.bookkeeper.mledger.Position;
 import org.apache.bookkeeper.mledger.impl.ManagedLedgerFactoryImpl;
 import org.apache.bookkeeper.test.MockedBookKeeperTestCase;
-import org.apache.pulsar.broker.NoOpShutdownService;
 import org.apache.pulsar.broker.PulsarService;
 import org.apache.pulsar.broker.ServiceConfiguration;
 import org.apache.pulsar.broker.namespace.NamespaceService;
 import org.apache.pulsar.broker.service.persistent.PersistentSubscription;
 import org.apache.pulsar.broker.service.persistent.PersistentTopic;
-import org.apache.pulsar.common.api.proto.PulsarApi;
-import org.apache.pulsar.common.api.proto.PulsarApi.CommandSubscribe.InitialPosition;
+import org.apache.pulsar.common.api.proto.CommandSubscribe;
+import org.apache.pulsar.common.api.proto.CommandSubscribe.InitialPosition;
 import org.apache.pulsar.common.naming.TopicName;
 import org.apache.pulsar.common.naming.NamespaceBundle;
+import org.apache.pulsar.common.policies.data.InactiveTopicDeleteMode;
 import org.apache.pulsar.common.util.collections.ConcurrentOpenHashMap;
 import org.apache.zookeeper.ZooKeeper;
 import org.slf4j.Logger;
@@ -57,10 +58,11 @@ import org.slf4j.LoggerFactory;
 import org.testng.annotations.BeforeMethod;
 
 import com.google.common.collect.Lists;
+import org.testng.annotations.Test;
 
-/**
- */
+@Test(groups = "broker")
 public class PersistentTopicConcurrentTest extends MockedBookKeeperTestCase {
+
     private BrokerService brokerService;
     private ManagedLedgerFactory mlFactoryMock;
     private ServerCnx serverCnx;
@@ -70,7 +72,6 @@ public class PersistentTopicConcurrentTest extends MockedBookKeeperTestCase {
     private ManagedCursor cursorMock;
 
     final String successTopicName = "persistent://prop/use/ns-abc/successTopic";
-    final String failTopicName = "persistent://prop/use/ns-abc/failTopic";
     final String successSubName = "successSub";
     private static final Logger log = LoggerFactory.getLogger(PersistentTopicTest.class);
 
@@ -79,14 +80,12 @@ public class PersistentTopicConcurrentTest extends MockedBookKeeperTestCase {
         super.setUp(m);
         ServiceConfiguration svcConfig = spy(new ServiceConfiguration());
         PulsarService pulsar = spy(new PulsarService(svcConfig));
-        pulsar.setShutdownService(new NoOpShutdownService());
         doReturn(svcConfig).when(pulsar).getConfiguration();
 
         mlFactoryMock = mock(ManagedLedgerFactory.class);
         ManagedLedgerFactory factory = new ManagedLedgerFactoryImpl(bkc, bkc.getZkHandle());
         ManagedLedger ledger = factory.open("my_test_ledger", new ManagedLedgerConfig().setMaxEntriesPerLedger(2));
-        final ManagedCursor cursor = ledger.openCursor("c1");
-        cursorMock = cursor;
+        cursorMock = ledger.openCursor("c1");
         ledgerMock = ledger;
         mlFactoryMock = factory;
         doReturn(mlFactoryMock).when(pulsar).getManagedLedgerFactory();
@@ -104,6 +103,7 @@ public class PersistentTopicConcurrentTest extends MockedBookKeeperTestCase {
         doReturn(nsSvc).when(pulsar).getNamespaceService();
         doReturn(true).when(nsSvc).isServiceUnitOwned(any(NamespaceBundle.class));
         doReturn(true).when(nsSvc).isServiceUnitActive(any(TopicName.class));
+        doReturn(CompletableFuture.completedFuture(true)).when(nsSvc).checkTopicOwnership(any(TopicName.class));
 
         final List<Position> addedEntries = Lists.newArrayList();
 
@@ -113,16 +113,19 @@ public class PersistentTopicConcurrentTest extends MockedBookKeeperTestCase {
         }
     }
 
-    // @Test
+    @Test(enabled = false)
     public void testConcurrentTopicAndSubscriptionDelete() throws Exception {
         // create topic
         final PersistentTopic topic = (PersistentTopic) brokerService.getOrCreateTopic(successTopicName).get();
-        PulsarApi.CommandSubscribe cmd = PulsarApi.CommandSubscribe.newBuilder().setConsumerId(1)
-                .setTopic(successTopicName).setSubscription(successSubName).setRequestId(1)
-                .setSubType(PulsarApi.CommandSubscribe.SubType.Exclusive).build();
+        CommandSubscribe cmd = new CommandSubscribe()
+                .setConsumerId(1)
+                .setTopic(successTopicName)
+                .setSubscription(successSubName)
+                .setRequestId(1)
+                .setSubType(CommandSubscribe.SubType.Exclusive);
 
         Future<Consumer> f1 = topic.subscribe(serverCnx, cmd.getSubscription(), cmd.getConsumerId(), cmd.getSubType(),
-                0, cmd.getConsumerName(), cmd.getDurable(), null, Collections.emptyMap(), cmd.getReadCompacted(), InitialPosition.Latest,
+                0, cmd.getConsumerName(), cmd.isDurable(), null, Collections.emptyMap(), cmd.isReadCompacted(), InitialPosition.Latest,
                 0 /*avoid reseting cursor*/, false /* replicated */, null);
         f1.get();
 
@@ -172,16 +175,19 @@ public class PersistentTopicConcurrentTest extends MockedBookKeeperTestCase {
         assertFalse(gotException.get());
     }
 
-    // @Test
+    @Test(enabled = false)
     public void testConcurrentTopicGCAndSubscriptionDelete() throws Exception {
         // create topic
         final PersistentTopic topic = (PersistentTopic) brokerService.getOrCreateTopic(successTopicName).get();
-        PulsarApi.CommandSubscribe cmd = PulsarApi.CommandSubscribe.newBuilder().setConsumerId(1)
-                .setTopic(successTopicName).setSubscription(successSubName).setRequestId(1)
-                .setSubType(PulsarApi.CommandSubscribe.SubType.Exclusive).build();
+        CommandSubscribe cmd = new CommandSubscribe()
+                .setConsumerId(1)
+                .setTopic(successTopicName)
+                .setSubscription(successSubName)
+                .setRequestId(1)
+                .setSubType(CommandSubscribe.SubType.Exclusive);
 
         Future<Consumer> f1 = topic.subscribe(serverCnx, cmd.getSubscription(), cmd.getConsumerId(), cmd.getSubType(),
-                0, cmd.getConsumerName(), cmd.getDurable(), null, Collections.emptyMap(), cmd.getReadCompacted(), InitialPosition.Latest,
+                0, cmd.getConsumerName(), cmd.isDurable(), null, Collections.emptyMap(), cmd.isReadCompacted(), InitialPosition.Latest,
                 0 /*avoid reseting cursor*/, false /* replicated */, null);
         f1.get();
 
@@ -197,7 +203,9 @@ public class PersistentTopicConcurrentTest extends MockedBookKeeperTestCase {
                     // Thread.sleep(5,0);
                     log.info("{} forcing topic GC ", Thread.currentThread());
                     for (int i = 0; i < 2000; i++) {
-                        topic.checkGC(0);
+                        topic.getInactiveTopicPolicies().setMaxInactiveDurationSeconds(0);
+                        topic.getInactiveTopicPolicies().setInactiveTopicDeleteMode(InactiveTopicDeleteMode.delete_when_no_subscriptions);
+                        topic.checkGC();
                     }
                     log.info("GC done..");
                 } catch (Exception e) {
@@ -235,16 +243,19 @@ public class PersistentTopicConcurrentTest extends MockedBookKeeperTestCase {
         assertFalse(gotException.get());
     }
 
-    // @Test
+    @Test(enabled = false)
     public void testConcurrentTopicDeleteAndUnsubscribe() throws Exception {
         // create topic
         final PersistentTopic topic = (PersistentTopic) brokerService.getOrCreateTopic(successTopicName).get();
-        PulsarApi.CommandSubscribe cmd = PulsarApi.CommandSubscribe.newBuilder().setConsumerId(1)
-                .setTopic(successTopicName).setSubscription(successSubName).setRequestId(1)
-                .setSubType(PulsarApi.CommandSubscribe.SubType.Exclusive).build();
+        CommandSubscribe cmd = new CommandSubscribe()
+                .setConsumerId(1)
+                .setTopic(successTopicName)
+                .setSubscription(successSubName)
+                .setRequestId(1)
+                .setSubType(CommandSubscribe.SubType.Exclusive);
 
         Future<Consumer> f1 = topic.subscribe(serverCnx, cmd.getSubscription(), cmd.getConsumerId(), cmd.getSubType(),
-                0, cmd.getConsumerName(), cmd.getDurable(), null, Collections.emptyMap(), cmd.getReadCompacted(), InitialPosition.Latest,
+                0, cmd.getConsumerName(), cmd.isDurable(), null, Collections.emptyMap(), cmd.isReadCompacted(), InitialPosition.Latest,
                 0 /*avoid reseting cursor*/, false /* replicated */, null);
         f1.get();
 
@@ -294,16 +305,19 @@ public class PersistentTopicConcurrentTest extends MockedBookKeeperTestCase {
         assertFalse(gotException.get());
     }
 
-    // @Test
+    @Test(enabled = false)
     public void testConcurrentTopicDeleteAndSubsUnsubscribe() throws Exception {
         // create topic
         final PersistentTopic topic = (PersistentTopic) brokerService.getOrCreateTopic(successTopicName).get();
-        PulsarApi.CommandSubscribe cmd = PulsarApi.CommandSubscribe.newBuilder().setConsumerId(1)
-                .setTopic(successTopicName).setSubscription(successSubName).setRequestId(1)
-                .setSubType(PulsarApi.CommandSubscribe.SubType.Exclusive).build();
+        CommandSubscribe cmd = new CommandSubscribe()
+                .setConsumerId(1)
+                .setTopic(successTopicName)
+                .setSubscription(successSubName)
+                .setRequestId(1)
+                .setSubType(CommandSubscribe.SubType.Exclusive);
 
         Future<Consumer> f1 = topic.subscribe(serverCnx, cmd.getSubscription(), cmd.getConsumerId(), cmd.getSubType(),
-                0, cmd.getConsumerName(), cmd.getDurable(), null, Collections.emptyMap(), cmd.getReadCompacted(), InitialPosition.Latest,
+                0, cmd.getConsumerName(), cmd.isDurable(), null, Collections.emptyMap(), cmd.isReadCompacted(), InitialPosition.Latest,
                 0 /*avoid reseting cursor*/, false /* replicated */, null);
         f1.get();
 

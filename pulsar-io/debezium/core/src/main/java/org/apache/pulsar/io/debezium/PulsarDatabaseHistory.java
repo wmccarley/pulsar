@@ -19,7 +19,6 @@
 package org.apache.pulsar.io.debezium;
 
 import static org.apache.commons.lang.StringUtils.isBlank;
-
 import io.debezium.annotation.ThreadSafe;
 import io.debezium.config.Configuration;
 import io.debezium.config.Field;
@@ -83,8 +82,12 @@ public final class PulsarDatabaseHistory extends AbstractDatabaseHistory {
 
 
     @Override
-    public void configure(Configuration config, HistoryRecordComparator comparator, DatabaseHistoryListener listener) {
-        super.configure(config, comparator, listener);
+    public void configure(
+            Configuration config,
+            HistoryRecordComparator comparator,
+            DatabaseHistoryListener listener,
+            boolean useCatalogBeforeSchema) {
+        super.configure(config, comparator, listener, useCatalogBeforeSchema);
         if (!config.validateAndRecord(ALL_FIELDS, logger::error)) {
             throw new IllegalArgumentException("Error configuring an instance of "
                 + getClass().getSimpleName() + "; check the logs for details");
@@ -189,8 +192,8 @@ public final class PulsarDatabaseHistory extends AbstractDatabaseHistory {
     protected void recoverRecords(Consumer<HistoryRecord> records) {
         setupClientIfNeeded();
         try (Reader<String> historyReader = pulsarClient.newReader(Schema.STRING)
-            .topic(topicName)
-            .startMessageId(MessageId.earliest)
+                .topic(topicName)
+                .startMessageId(MessageId.earliest)
             .create()
         ) {
             log.info("Scanning the database history topic '{}'", topicName);
@@ -236,8 +239,8 @@ public final class PulsarDatabaseHistory extends AbstractDatabaseHistory {
     public boolean exists() {
         setupClientIfNeeded();
         try (Reader<String> historyReader = pulsarClient.newReader(Schema.STRING)
-            .topic(topicName)
-            .startMessageId(MessageId.earliest)
+                .topic(topicName)
+                .startMessageId(MessageId.earliest)
             .create()
         ) {
             return historyReader.hasMessageAvailable();

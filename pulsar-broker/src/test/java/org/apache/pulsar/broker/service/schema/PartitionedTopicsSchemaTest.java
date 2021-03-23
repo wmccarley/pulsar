@@ -35,6 +35,7 @@ import org.apache.pulsar.client.api.Schema;
 import org.apache.pulsar.client.api.SubscriptionInitialPosition;
 import org.testng.annotations.Test;
 
+@Test(groups = "broker")
 public class PartitionedTopicsSchemaTest extends BkEnsemblesTestBase {
 
     /**
@@ -50,7 +51,7 @@ public class PartitionedTopicsSchemaTest extends BkEnsemblesTestBase {
 
         int N = 10;
 
-        PulsarClient client = PulsarClient.builder().serviceUrl("pulsar://localhost:" + BROKER_SERVICE_PORT).build();
+        PulsarClient client = PulsarClient.builder().serviceUrl(pulsar.getBrokerServiceUrl()).build();
 
         CompletableFuture<Producer<String>> producerFuture = client.newProducer(Schema.STRING)
             .topic(topicName)

@@ -34,6 +34,19 @@ class PULSAR_PUBLIC ClientConfiguration {
     ClientConfiguration& operator=(const ClientConfiguration&);
 
     /**
+     * Configure a limit on the amount of memory that will be allocated by this client instance.
+     * Setting this to 0 will disable the limit. By default this is disabled.
+     *
+     * @param memoryLimitBytes the memory limit
+     */
+    ClientConfiguration& setMemoryLimit(uint64_t memoryLimitBytes);
+
+    /**
+     * @return the client memory limit in bytes
+     */
+    uint64_t getMemoryLimit() const;
+
+    /**
      * Set the authentication method to be used with the broker
      *
      * @param authentication the authentication data to use
@@ -43,7 +56,7 @@ class PULSAR_PUBLIC ClientConfiguration {
     /**
      * @return the authentication data
      */
-    const Authentication& getAuth() const;
+    Authentication& getAuth() const;
 
     /**
      * Set timeout on client operations (subscribe, create producer, close, unsubscribe)
@@ -121,10 +134,13 @@ class PULSAR_PUBLIC ClientConfiguration {
      * to a different logger implementation.
      *
      * By default, log messages are printed on standard output.
+     *
+     * When passed in, the configuration takes ownership of the loggerFactory object.
+     * The logger factory can only be set once per process. Any subsequent calls to
+     * set the logger factory will have no effect, though the logger factory object
+     * will be cleaned up.
      */
-    ClientConfiguration& setLogger(LoggerFactoryPtr loggerFactory);
-
-    LoggerFactoryPtr getLogger() const;
+    ClientConfiguration& setLogger(LoggerFactory* loggerFactory);
 
     ClientConfiguration& setUseTls(bool useTls);
     bool isUseTls() const;
@@ -138,6 +154,9 @@ class PULSAR_PUBLIC ClientConfiguration {
     ClientConfiguration& setValidateHostName(bool validateHostName);
     bool isValidateHostName() const;
 
+    ClientConfiguration& setListenerName(const std::string& listenerName);
+    const std::string& getListenerName() const;
+
     /*
      * Initialize stats interval in seconds. Stats are printed and reset after every 'statsIntervalInSeconds'.
      * Set to 0 in order to disable stats collection.
@@ -148,6 +167,22 @@ class PULSAR_PUBLIC ClientConfiguration {
      * Get the stats interval set in the client.
      */
     const unsigned int& getStatsIntervalInSeconds() const;
+
+    /**
+     * Set partitions update interval in seconds.
+     * If a partitioned topic is produced or subscribed and `intervalInSeconds` is not 0, every
+     * `intervalInSeconds` seconds the partition number will be retrieved by sending lookup requests. If
+     * partition number has been increased, more producer/consumer of increased partitions will be created.
+     * Default is 60 seconds.
+     *
+     * @param intervalInSeconds the seconds between two lookup request for partitioned topic's metadata
+     */
+    ClientConfiguration& setPartititionsUpdateInterval(unsigned int intervalInSeconds);
+
+    /**
+     * Get partitions update interval in seconds.
+     */
+    unsigned int getPartitionsUpdateInterval() const;
 
     friend class ClientImpl;
     friend class PulsarWrapper;

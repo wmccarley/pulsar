@@ -17,9 +17,14 @@
  * under the License.
  */
 
-#include <lib/ProducerImpl.h>
-#include <lib/ConsumerImpl.h>
 #include <string>
+
+#include "lib/ClientImpl.h"
+#include "lib/ProducerImpl.h"
+#include "lib/PartitionedProducerImpl.h"
+#include "lib/ConsumerImpl.h"
+#include "lib/PartitionedConsumerImpl.h"
+#include "lib/MultiTopicsConsumerImpl.h"
 
 using std::string;
 
@@ -63,6 +68,24 @@ class PulsarFriend {
     static ConsumerImpl& getConsumerImpl(Consumer consumer) {
         ConsumerImpl* consumerImpl = static_cast<ConsumerImpl*>(consumer.impl_.get());
         return *consumerImpl;
+    }
+
+    static std::shared_ptr<ConsumerImpl> getConsumerImplPtr(Consumer consumer) {
+        return std::static_pointer_cast<ConsumerImpl>(consumer.impl_);
+    }
+
+    static std::shared_ptr<PartitionedConsumerImpl> getPartitionedConsumerImplPtr(Consumer consumer) {
+        return std::static_pointer_cast<PartitionedConsumerImpl>(consumer.impl_);
+    }
+
+    static std::shared_ptr<MultiTopicsConsumerImpl> getMultiTopicsConsumerImplPtr(Consumer consumer) {
+        return std::static_pointer_cast<MultiTopicsConsumerImpl>(consumer.impl_);
+    }
+
+    static std::shared_ptr<ClientImpl> getClientImplPtr(Client client) { return client.impl_; }
+
+    static void setNegativeAckEnabled(Consumer consumer, bool enabled) {
+        consumer.impl_->setNegativeAcknowledgeEnabledForTesting(enabled);
     }
 
     static ClientConnectionWeakPtr getClientConnection(HandlerBase& handler) { return handler.connection_; }

@@ -23,37 +23,44 @@ import org.apache.pulsar.common.functions.WorkerInfo;
 import org.apache.pulsar.common.io.ConnectorDefinition;
 import org.apache.pulsar.common.policies.data.FunctionStats;
 import org.apache.pulsar.common.policies.data.WorkerFunctionInstanceStats;
+import org.apache.pulsar.common.util.RestException;
 import org.apache.pulsar.functions.proto.Function;
 import org.apache.pulsar.functions.utils.FunctionCommon;
 import org.apache.pulsar.functions.worker.FunctionRuntimeInfo;
 import org.apache.pulsar.functions.worker.FunctionRuntimeManager;
 import org.apache.pulsar.functions.worker.MembershipManager;
+import org.apache.pulsar.functions.worker.PulsarWorkerService;
+import org.apache.pulsar.functions.worker.SchedulerManager;
 import org.apache.pulsar.functions.worker.WorkerService;
 import org.apache.pulsar.functions.worker.WorkerUtils;
-import org.apache.pulsar.functions.worker.rest.RestException;
 
+import javax.ws.rs.WebApplicationException;
+import javax.ws.rs.core.Response;
 import javax.ws.rs.core.Response.Status;
+import javax.ws.rs.core.UriBuilder;
 import java.io.IOException;
+import java.net.URI;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Supplier;
+import org.apache.pulsar.functions.worker.service.api.Workers;
 
 import static com.google.common.base.Preconditions.checkNotNull;
 import static org.apache.pulsar.functions.worker.rest.RestUtils.throwUnavailableException;
 
 @Slf4j
-public class WorkerImpl {
+public class WorkerImpl implements Workers<PulsarWorkerService> {
 
-    private final Supplier<WorkerService> workerServiceSupplier;
+    private final Supplier<PulsarWorkerService> workerServiceSupplier;
 
-    public WorkerImpl(Supplier<WorkerService> workerServiceSupplier) {
+    public WorkerImpl(Supplier<PulsarWorkerService> workerServiceSupplier) {
         this.workerServiceSupplier = workerServiceSupplier;
     }
 
-    private WorkerService worker() {
+    private PulsarWorkerService worker() {
         try {
             return checkNotNull(workerServiceSupplier.get());
         } catch (Throwable t) {
@@ -73,6 +80,7 @@ public class WorkerImpl {
         return true;
     }
 
+    @Override
     public List<WorkerInfo> getCluster(String clientRole) {
         if (!isWorkerServiceAvailable()) {
             throwUnavailableException();
@@ -86,6 +94,7 @@ public class WorkerImpl {
         return workers;
     }
 
+    @Override
     public WorkerInfo getClusterLeader(String clientRole) {
         if (!isWorkerServiceAvailable()) {
             throwUnavailableException();
@@ -106,6 +115,7 @@ public class WorkerImpl {
         return leader;
     }
 
+    @Override
     public Map<String, Collection<String>> getAssignments(String clientRole) {
         if (!isWorkerServiceAvailable()) {
             throwUnavailableException();
@@ -129,8 +139,9 @@ public class WorkerImpl {
         return clientRole != null && worker().getWorkerConfig().getSuperUserRoles().contains(clientRole);
     }
 
+    @Override
     public List<org.apache.pulsar.common.stats.Metrics> getWorkerMetrics(final String clientRole) {
-        if (!isWorkerServiceAvailable()) {
+        if (!isWorkerServiceAvailable() || worker().getMetricsGenerator() == null) {
             throwUnavailableException();
         }
 
@@ -141,6 +152,7 @@ public class WorkerImpl {
         return worker().getMetricsGenerator().generate();
     }
 
+    @Override
     public List<WorkerFunctionInstanceStats> getFunctionsMetrics(String clientRole) throws IOException {
         if (!isWorkerServiceAvailable()) {
             throwUnavailableException();
@@ -151,8 +163,7 @@ public class WorkerImpl {
             throw new RestException(Status.UNAUTHORIZED, "client is not authorize to perform operation");
         }
 
-        WorkerService workerService = worker();
-        Map<String, FunctionRuntimeInfo> functionRuntimes = workerService.getFunctionRuntimeManager()
+        Map<String, FunctionRuntimeInfo> functionRuntimes = worker().getFunctionRuntimeManager()
                 .getFunctionRuntimeInfos();
 
         List<WorkerFunctionInstanceStats> metricsList = new ArrayList<>(functionRuntimes.size());
@@ -161,7 +172,7 @@ public class WorkerImpl {
             String fullyQualifiedInstanceName = entry.getKey();
             FunctionRuntimeInfo functionRuntimeInfo = entry.getValue();
 
-            if (workerService.getFunctionRuntimeManager().getRuntimeFactory().externallyManaged()) {
+            if (worker().getFunctionRuntimeManager().getRuntimeFactory().externallyManaged()) {
                 Function.FunctionDetails functionDetails = functionRuntimeInfo.getFunctionInstance().getFunctionMetaData().getFunctionDetails();
                 int parallelism = functionDetails.getParallelism();
                 for (int i = 0; i < parallelism; ++i) {
@@ -187,6 +198,7 @@ public class WorkerImpl {
         return metricsList;
     }
 
+    @Override
     public List<ConnectorDefinition> getListOfConnectors(String clientRole) {
         if (!isWorkerServiceAvailable()) {
             throwUnavailableException();
@@ -196,6 +208,42 @@ public class WorkerImpl {
             throw new RestException(Status.UNAUTHORIZED, "client is not authorize to perform operation");
         }
 
-        return this.worker().getConnectorsManager().getConnectors();
+        return this.worker().getConnectorsManager().getConnectorDefinitions();
+    }
+
+    public void rebalance(final URI uri, final String clientRole) {
+        if (!isWorkerServiceAvailable()) {
+            throwUnavailableException();
+        }
+
+        if (worker().getWorkerConfig().isAuthorizationEnabled() && !isSuperUser(clientRole)) {
+            log.error("Client [{}] is not authorized rebalance cluster", clientRole);
+            throw new RestException(Status.UNAUTHORIZED, "client is not authorize to perform operation");
+        }
+
+        if (worker().getLeaderService().isLeader()) {
+            try {
+                worker().getSchedulerManager().rebalanceIfNotInprogress();
+            } catch (SchedulerManager.RebalanceInProgressException e) {
+                throw new RestException(Status.BAD_REQUEST, "Rebalance already in progress");
+            }
+        } else {
+            WorkerInfo workerInfo = worker().getMembershipManager().getLeader();
+            URI redirect = UriBuilder.fromUri(uri).host(workerInfo.getWorkerHostname()).port(workerInfo.getPort()).build();
+            throw new WebApplicationException(Response.temporaryRedirect(redirect).build());
+        }
+    }
+
+    @Override
+    public Boolean isLeaderReady(final String clientRole) {
+        if (!isWorkerServiceAvailable()) {
+            throwUnavailableException();
+        }
+        if (worker().getLeaderService().isLeader()) {
+            return true;
+        } else {
+            throwUnavailableException();
+            return false; // make compiler happy
+        }
     }
 }

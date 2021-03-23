@@ -23,15 +23,19 @@ import static org.apache.bookkeeper.client.RegionAwareEnsemblePlacementPolicy.RE
 import static org.apache.bookkeeper.client.RegionAwareEnsemblePlacementPolicy.REPP_ENABLE_VALIDATION;
 import static org.apache.bookkeeper.client.RegionAwareEnsemblePlacementPolicy.REPP_MINIMUM_REGIONS_FOR_DURABILITY;
 import static org.apache.bookkeeper.client.RegionAwareEnsemblePlacementPolicy.REPP_REGIONS_TO_WRITE;
+import static org.apache.bookkeeper.conf.AbstractConfiguration.MIN_NUM_RACKS_PER_WRITE_QUORUM;
+import static org.apache.bookkeeper.conf.AbstractConfiguration.ENFORCE_MIN_NUM_RACKS_PER_WRITE_QUORUM;
 import static org.mockito.Mockito.mock;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertNull;
 import static org.testng.Assert.assertTrue;
+import static org.testng.Assert.fail;
 
 import java.util.concurrent.atomic.AtomicReference;
 import org.apache.bookkeeper.conf.ClientConfiguration;
 import org.apache.bookkeeper.net.CachedDNSToSwitchMapping;
+import org.apache.commons.configuration.ConfigurationException;
 import org.apache.pulsar.zookeeper.ZkBookieRackAffinityMapping;
 import org.apache.pulsar.zookeeper.ZooKeeperCache;
 import org.apache.zookeeper.ZooKeeper;
@@ -40,6 +44,7 @@ import org.testng.annotations.Test;
 /**
  * Unit test {@link BookKeeperClientFactoryImpl}.
  */
+@Test(groups = "broker")
 public class BookKeeperClientFactoryImplTest {
 
     @Test
@@ -55,6 +60,8 @@ public class BookKeeperClientFactoryImplTest {
         assertNull(bkConf.getProperty(REPP_MINIMUM_REGIONS_FOR_DURABILITY));
         assertNull(bkConf.getProperty(REPP_ENABLE_DURABILITY_ENFORCEMENT_IN_REPLACE));
         assertNull(bkConf.getProperty(REPP_DNS_RESOLVER_CLASS));
+        assertNull(bkConf.getProperty(MIN_NUM_RACKS_PER_WRITE_QUORUM));
+        assertNull(bkConf.getProperty(ENFORCE_MIN_NUM_RACKS_PER_WRITE_QUORUM));
 
         BookKeeperClientFactoryImpl.setDefaultEnsemblePlacementPolicy(
             rackawarePolicyZkCache,
@@ -71,6 +78,8 @@ public class BookKeeperClientFactoryImplTest {
         assertEquals(
             bkConf.getProperty(REPP_DNS_RESOLVER_CLASS),
             ZkBookieRackAffinityMapping.class.getName());
+        assertFalse(bkConf.getEnforceMinNumRacksPerWriteQuorum());
+        assertEquals(2, bkConf.getMinNumRacksPerWriteQuorum());
 
         ((ZooKeeperCache) bkConf.getProperty(ZooKeeperCache.ZK_CACHE_INSTANCE)).stop();
     }
@@ -88,6 +97,8 @@ public class BookKeeperClientFactoryImplTest {
         assertNull(bkConf.getProperty(REPP_MINIMUM_REGIONS_FOR_DURABILITY));
         assertNull(bkConf.getProperty(REPP_ENABLE_DURABILITY_ENFORCEMENT_IN_REPLACE));
         assertNull(bkConf.getProperty(REPP_DNS_RESOLVER_CLASS));
+        assertNull(bkConf.getProperty(MIN_NUM_RACKS_PER_WRITE_QUORUM));
+        assertNull(bkConf.getProperty(ENFORCE_MIN_NUM_RACKS_PER_WRITE_QUORUM));
 
         conf.setBookkeeperClientRegionawarePolicyEnabled(true);
 
@@ -106,6 +117,8 @@ public class BookKeeperClientFactoryImplTest {
         assertEquals(
             bkConf.getProperty(REPP_DNS_RESOLVER_CLASS),
             ZkBookieRackAffinityMapping.class.getName());
+        assertFalse(bkConf.getEnforceMinNumRacksPerWriteQuorum());
+        assertEquals(2, bkConf.getMinNumRacksPerWriteQuorum());
 
         ((ZooKeeperCache) bkConf.getProperty(ZooKeeperCache.ZK_CACHE_INSTANCE)).stop();
     }
@@ -123,6 +136,8 @@ public class BookKeeperClientFactoryImplTest {
         assertNull(bkConf.getProperty(REPP_MINIMUM_REGIONS_FOR_DURABILITY));
         assertNull(bkConf.getProperty(REPP_ENABLE_DURABILITY_ENFORCEMENT_IN_REPLACE));
         assertNull(bkConf.getProperty(REPP_DNS_RESOLVER_CLASS));
+        assertNull(bkConf.getProperty(MIN_NUM_RACKS_PER_WRITE_QUORUM));
+        assertNull(bkConf.getProperty(ENFORCE_MIN_NUM_RACKS_PER_WRITE_QUORUM));
 
         conf.setBookkeeperClientRegionawarePolicyEnabled(true);
         conf.getProperties().setProperty(REPP_ENABLE_VALIDATION, "false");
@@ -130,6 +145,8 @@ public class BookKeeperClientFactoryImplTest {
         conf.getProperties().setProperty(REPP_MINIMUM_REGIONS_FOR_DURABILITY, "4");
         conf.getProperties().setProperty(REPP_ENABLE_DURABILITY_ENFORCEMENT_IN_REPLACE, "false");
         conf.getProperties().setProperty(REPP_DNS_RESOLVER_CLASS, CachedDNSToSwitchMapping.class.getName());
+        conf.setBookkeeperClientMinNumRacksPerWriteQuorum(20);
+        conf.setBookkeeperClientEnforceMinNumRacksPerWriteQuorum(true);
 
         BookKeeperClientFactoryImpl.setDefaultEnsemblePlacementPolicy(
             rackawarePolicyZkCache,
@@ -146,6 +163,8 @@ public class BookKeeperClientFactoryImplTest {
         assertEquals(
             bkConf.getProperty(REPP_DNS_RESOLVER_CLASS),
             CachedDNSToSwitchMapping.class.getName());
+        assertTrue(bkConf.getEnforceMinNumRacksPerWriteQuorum());
+        assertEquals(20, bkConf.getMinNumRacksPerWriteQuorum());
 
         ((ZooKeeperCache) bkConf.getProperty(ZooKeeperCache.ZK_CACHE_INSTANCE)).stop();
     }
@@ -154,9 +173,50 @@ public class BookKeeperClientFactoryImplTest {
     public void testSetDiskWeightBasedPlacementEnabled() {
         BookKeeperClientFactoryImpl factory = new BookKeeperClientFactoryImpl();
         ServiceConfiguration conf = new ServiceConfiguration();
+        conf.setZookeeperServers("localhost:2181");
         assertFalse(factory.createBkClientConfiguration(conf).getDiskWeightBasedPlacementEnabled());
         conf.setBookkeeperDiskWeightBasedPlacementEnabled(true);
         assertTrue(factory.createBkClientConfiguration(conf).getDiskWeightBasedPlacementEnabled());
+    }
+
+    @Test
+    public void testSetExplicitLacInterval() {
+        BookKeeperClientFactoryImpl factory = new BookKeeperClientFactoryImpl();
+        ServiceConfiguration conf = new ServiceConfiguration();
+        conf.setZookeeperServers("localhost:2181");
+        assertEquals(factory.createBkClientConfiguration(conf).getExplictLacInterval(), 0);
+        conf.setBookkeeperExplicitLacIntervalInMills(5);
+        assertEquals(factory.createBkClientConfiguration(conf).getExplictLacInterval(), 5);
+    }
+
+    @Test
+    public void testSetMetadataServiceUri() {
+        BookKeeperClientFactoryImpl factory = new BookKeeperClientFactoryImpl();
+        ServiceConfiguration conf = new ServiceConfiguration();
+        conf.setZookeeperServers("localhost:2181");
+        try {
+            String defaultUri = "zk+null://localhost:2181/ledgers";
+            assertEquals(factory.createBkClientConfiguration(conf).getMetadataServiceUri(), defaultUri);
+            String expectedUri = "zk+hierarchical://localhost:2181/chroot/ledgers";
+            conf.setBookkeeperMetadataServiceUri(expectedUri);
+            assertEquals(factory.createBkClientConfiguration(conf).getMetadataServiceUri(), expectedUri);
+        } catch (ConfigurationException e) {
+            e.printStackTrace();
+            fail("Get metadata service uri should be successful", e);
+        }
+    }
+
+    @Test
+    public void testOpportunisticStripingConfiguration() {
+        BookKeeperClientFactoryImpl factory = new BookKeeperClientFactoryImpl();
+        ServiceConfiguration conf = new ServiceConfiguration();
+        // default value
+        assertFalse(factory.createBkClientConfiguration(conf).getOpportunisticStriping());
+        conf.getProperties().setProperty("bookkeeper_opportunisticStriping", "true");
+        assertTrue(factory.createBkClientConfiguration(conf).getOpportunisticStriping());
+        conf.getProperties().setProperty("bookkeeper_opportunisticStriping", "false");
+        assertFalse(factory.createBkClientConfiguration(conf).getOpportunisticStriping());
+
     }
 
 }

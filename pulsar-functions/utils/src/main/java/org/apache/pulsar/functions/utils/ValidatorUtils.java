@@ -21,17 +21,22 @@ package org.apache.pulsar.functions.utils;
 
 import lombok.extern.slf4j.Slf4j;
 import net.jodah.typetools.TypeResolver;
+import org.apache.pulsar.client.api.CryptoKeyReader;
 import org.apache.pulsar.client.api.Schema;
+import org.apache.pulsar.common.functions.CryptoConfig;
 import org.apache.pulsar.common.schema.SchemaType;
+import org.apache.pulsar.common.util.ClassLoaderUtils;
+import org.apache.pulsar.common.util.Reflections;
 import org.apache.pulsar.functions.api.SerDe;
 import org.apache.pulsar.functions.proto.Function;
 import org.apache.pulsar.io.core.Sink;
 import org.apache.pulsar.io.core.Source;
 
+import java.util.Map;
+
 import static org.apache.commons.lang3.StringUtils.isBlank;
 import static org.apache.commons.lang3.StringUtils.isEmpty;
 import static org.apache.commons.lang3.StringUtils.isNotBlank;
-import static org.apache.pulsar.functions.utils.Reflections.createInstance;
 
 @Slf4j
 public class ValidatorUtils {
@@ -43,7 +48,7 @@ public class ValidatorUtils {
             // If it's empty, we use the default schema and no need to validate
             // If it's built-in, no need to validate
         } else {
-            FunctionCommon.implementsClass(schemaType, Schema.class, clsLoader);
+            ClassLoaderUtils.implementsClass(schemaType, Schema.class, clsLoader);
             validateSchemaType(schemaType, typeArg, clsLoader, input);
         }
     }
@@ -57,18 +62,47 @@ public class ValidatorUtils {
         }
     }
 
+
+    public static void validateCryptoKeyReader(CryptoConfig conf, ClassLoader classLoader, boolean isProducer) {
+        if (isEmpty(conf.getCryptoKeyReaderClassName())) return;
+
+        Class<?> cryptoClass;
+        try {
+            cryptoClass = ClassLoaderUtils.loadClass(conf.getCryptoKeyReaderClassName(), classLoader);
+        } catch (ClassNotFoundException | NoClassDefFoundError e) {
+            throw new IllegalArgumentException(
+                    String.format("The crypto key reader class %s does not exist", conf.getCryptoKeyReaderClassName()));
+        }
+        ClassLoaderUtils.implementsClass(conf.getCryptoKeyReaderClassName(), CryptoKeyReader.class, classLoader);
+
+        try {
+            cryptoClass.getConstructor(Map.class);
+        } catch (NoSuchMethodException ex) {
+            throw new IllegalArgumentException(
+                    String.format("The crypto key reader class %s does not implement the desired constructor.",
+                            conf.getCryptoKeyReaderClassName()));
+
+        } catch (SecurityException e) {
+            throw new IllegalArgumentException("Failed to access crypto key reader class", e);
+        }
+
+        if (isProducer && (conf.getEncryptionKeys() == null || conf.getEncryptionKeys().length == 0)) {
+            throw new IllegalArgumentException("Missing encryption key name for producer crypto key reader");
+        }
+    }
+
     public static void validateSerde(String inputSerializer, Class<?> typeArg, ClassLoader clsLoader,
                                      boolean deser) {
         if (isEmpty(inputSerializer)) return;
         if (inputSerializer.equals(DEFAULT_SERDE)) return;
         try {
-            Class<?> serdeClass = FunctionCommon.loadClass(inputSerializer, clsLoader);
-        } catch (ClassNotFoundException e) {
+            Class<?> serdeClass = ClassLoaderUtils.loadClass(inputSerializer, clsLoader);
+        } catch (ClassNotFoundException | NoClassDefFoundError e) {
             throw new IllegalArgumentException(
                     String.format("The input serialization/deserialization class %s does not exist",
                             inputSerializer));
         }
-        FunctionCommon.implementsClass(inputSerializer, SerDe.class, clsLoader);
+        ClassLoaderUtils.implementsClass(inputSerializer, SerDe.class, clsLoader);
 
         SerDe serDe = (SerDe) Reflections.createInstance(inputSerializer, clsLoader);
         if (serDe == null) {
@@ -84,7 +118,7 @@ public class ValidatorUtils {
         try {
             fnInputClass = Class.forName(typeArg.getName(), true, clsLoader);
             serdeInputClass = Class.forName(serDeTypes[0].getName(), true, clsLoader);
-        } catch (ClassNotFoundException e) {
+        } catch (ClassNotFoundException | NoClassDefFoundError e) {
             throw new IllegalArgumentException("Failed to load type class", e);
         }
 
@@ -115,7 +149,7 @@ public class ValidatorUtils {
         try {
             fnInputClass = Class.forName(typeArg.getName(), true, clsLoader);
             schemaInputClass = Class.forName(schemaTypes[0].getName(), true, clsLoader);
-        } catch (ClassNotFoundException e) {
+        } catch (ClassNotFoundException | NoClassDefFoundError e) {
             throw new IllegalArgumentException("Failed to load type class", e);
         }
 
@@ -132,6 +166,7 @@ public class ValidatorUtils {
         }
     }
 
+
     public static void validateFunctionClassTypes(ClassLoader classLoader, Function.FunctionDetails.Builder functionDetailsBuilder) {
 
         // validate only if classLoader is provided
@@ -147,7 +182,7 @@ public class ValidatorUtils {
         Class functionClass;
         try {
             functionClass = classLoader.loadClass(functionDetailsBuilder.getClassName());
-        } catch (ClassNotFoundException e) {
+        } catch (ClassNotFoundException | NoClassDefFoundError e) {
             throw new IllegalArgumentException(
                     String.format("Function class %s must be in class path", functionDetailsBuilder.getClassName()), e);
         }

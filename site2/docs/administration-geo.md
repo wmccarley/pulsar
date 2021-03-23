@@ -35,8 +35,7 @@ In normal cases, when connectivity issues are none, messages are replicated imme
 
 Applications can create producers and consumers in any of the clusters, even when the remote clusters are not reachable (like during a network partition).
 
-> #### Subscriptions are local to a cluster
-> While producers and consumers can publish to and consume from any cluster in a Pulsar instance, subscriptions are local to the clusters in which the subscriptions are created and cannot be transferred between clusters. If you do need to transfer a subscription, you need to create a new subscription in the desired cluster.
+Producers and consumers can publish messages to and consume messages from any cluster in a Pulsar instance. However, subscriptions cannot only be local to the cluster where the subscriptions are created but also can be transferred between clusters after replicated subscription is enabled. Once replicated subscription is enabled, you can keep subscription state in synchronization. Therefore, a topic can be asynchronously replicated across multiple geographical regions. In case of failover, a consumer can restart consuming messages from the failure point in a different cluster.
 
 In the aforementioned example, the **T1** topic is replicated among three clusters, **Cluster-A**, **Cluster-B**, and **Cluster-C**.
 
@@ -45,6 +44,44 @@ All messages produced in any of the three clusters are delivered to all subscrip
 ## Configure replication
 
 As stated in [Geo-replication and Pulsar properties](#geo-replication-and-pulsar-properties) section, geo-replication in Pulsar is managed at the [tenant](reference-terminology.md#tenant) level.
+
+The following example connects three clusters: **us-east**, **us-west**, and **us-cent**.
+
+### Connect replication clusters
+
+To replicate data among clusters, you need to configure each cluster to connect to the other. You can use the [`pulsar-admin`](http://pulsar.apache.org/tools/pulsar-admin/) tool to create a connection.
+
+**Example**
+
+Suppose that you have 3 replication clusters: `us-west`, `us-cent`, and `us-east`.
+
+1. Configure the connection from `us-west` to `us-east`.
+
+   Run the following command on `us-west`.
+
+```shell
+$ bin/pulsar-admin clusters create \
+  --broker-url pulsar://<DNS-OF-US-EAST>:<PORT>	\
+  --url http://<DNS-OF-US-EAST>:<PORT> \
+  us-east
+```
+
+   > #### Tip
+   >
+   > If you want to use a secure connection for a cluster, you can use the flags `--broker-url-secure` and `--url-secure`. For more information, see [pulsar-admin clusters create](http://pulsar.apache.org/tools/pulsar-admin/).
+
+2. Configure the connection from `us-west` to `us-cent`.
+
+   Run the following command on `us-west`.
+
+```shell
+$ bin/pulsar-admin clusters create \
+  --broker-url pulsar://<DNS-OF-US-CENT>:<PORT>	\
+  --url http://<DNS-OF-US-CENT>:<PORT> \
+  us-cent
+```
+
+3. Run similar commands on `us-east` and `us-cent` to create connections among clusters.
 
 ### Grant permissions to properties
 

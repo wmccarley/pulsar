@@ -27,21 +27,24 @@ import org.apache.pulsar.broker.web.AuthenticationFilter;
 import org.apache.pulsar.common.functions.WorkerInfo;
 import org.apache.pulsar.common.io.ConnectorDefinition;
 import org.apache.pulsar.functions.worker.WorkerService;
-import org.apache.pulsar.functions.worker.rest.api.WorkerImpl;
 
-import javax.servlet.ServletContext;
-import javax.servlet.http.HttpServletRequest;
-import javax.ws.rs.Consumes;
-import javax.ws.rs.GET;
-import javax.ws.rs.Path;
-import javax.ws.rs.Produces;
-import javax.ws.rs.core.Context;
-import javax.ws.rs.core.MediaType;
 import java.io.IOException;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Supplier;
+
+import javax.servlet.ServletContext;
+import javax.servlet.http.HttpServletRequest;
+import javax.ws.rs.Consumes;
+import javax.ws.rs.GET;
+import javax.ws.rs.PUT;
+import javax.ws.rs.Path;
+import javax.ws.rs.Produces;
+import javax.ws.rs.core.Context;
+import javax.ws.rs.core.MediaType;
+import javax.ws.rs.core.UriInfo;
+import org.apache.pulsar.functions.worker.service.api.Workers;
 
 @Slf4j
 @Path("/worker")
@@ -52,16 +55,13 @@ public class WorkerApiV2Resource implements Supplier<WorkerService> {
 
     public static final String ATTRIBUTE_WORKER_SERVICE = "worker";
 
-    protected final WorkerImpl worker;
     private WorkerService workerService;
     @Context
     protected ServletContext servletContext;
     @Context
     protected HttpServletRequest httpRequest;
-
-    public WorkerApiV2Resource() {
-        this.worker = new WorkerImpl(this);
-    }
+    @Context
+    protected UriInfo uri;
 
     @Override
     public synchronized WorkerService get() {
@@ -69,6 +69,10 @@ public class WorkerApiV2Resource implements Supplier<WorkerService> {
             this.workerService = (WorkerService) servletContext.getAttribute(ATTRIBUTE_WORKER_SERVICE);
         }
         return this.workerService;
+    }
+
+    Workers<? extends WorkerService> workers() {
+        return get().getWorkers();
     }
 
     public String clientAppId() {
@@ -90,7 +94,7 @@ public class WorkerApiV2Resource implements Supplier<WorkerService> {
     @Path("/cluster")
     @Produces(MediaType.APPLICATION_JSON)
     public List<WorkerInfo> getCluster() {
-        return worker.getCluster(clientAppId());
+        return workers().getCluster(clientAppId());
     }
 
     @GET
@@ -105,7 +109,7 @@ public class WorkerApiV2Resource implements Supplier<WorkerService> {
     @Path("/cluster/leader")
     @Produces(MediaType.APPLICATION_JSON)
     public WorkerInfo getClusterLeader() {
-        return worker.getClusterLeader(clientAppId());
+        return workers().getClusterLeader(clientAppId());
     }
 
     @GET
@@ -120,9 +124,14 @@ public class WorkerApiV2Resource implements Supplier<WorkerService> {
     @Path("/assignments")
     @Produces(MediaType.APPLICATION_JSON)
     public Map<String, Collection<String>> getAssignments() {
-        return worker.getAssignments(clientAppId());
+        return workers().getAssignments(clientAppId());
     }
 
+    @GET
+    @ApiOperation(
+            value = "Fetches a list of supported Pulsar IO connectors currently running in cluster mode",
+            response = List.class
+    )
     @ApiResponses(value = {
             @ApiResponse(code = 403, message = "The requester doesn't have admin permissions"),
             @ApiResponse(code = 400, message = "Invalid request"),
@@ -130,6 +139,33 @@ public class WorkerApiV2Resource implements Supplier<WorkerService> {
     })
     @Path("/connectors")
     public List<ConnectorDefinition> getConnectorsList() throws IOException {
-        return worker.getListOfConnectors(clientAppId());
+        return workers().getListOfConnectors(clientAppId());
+    }
+
+    @PUT
+    @ApiOperation(
+            value = "Triggers a rebalance of functions to workers"
+    )
+    @ApiResponses(value = {
+            @ApiResponse(code = 403, message = "The requester doesn't have admin permissions"),
+            @ApiResponse(code = 400, message = "Invalid request"),
+            @ApiResponse(code = 408, message = "Request timeout")
+    })
+    @Path("/rebalance")
+    public void rebalance() {
+        workers().rebalance(uri.getRequestUri(), clientAppId());
+    }
+
+    @GET
+    @ApiOperation(
+            value = "Checks if this node is the leader and is ready to service requests",
+            response = Boolean.class
+    )
+    @ApiResponses(value = {
+            @ApiResponse(code = 503, message = "Worker service is not running")
+    })
+    @Path("/cluster/leader/ready")
+    public Boolean isLeaderReady() {
+        return workers().isLeaderReady(clientAppId());
     }
 }

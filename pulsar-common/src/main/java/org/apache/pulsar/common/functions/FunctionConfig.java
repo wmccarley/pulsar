@@ -19,27 +19,18 @@
 package org.apache.pulsar.common.functions;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
-
 import java.util.Collection;
 import java.util.Map;
-
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
-import lombok.EqualsAndHashCode;
-import lombok.Getter;
 import lombok.NoArgsConstructor;
-import lombok.Setter;
-import lombok.ToString;
+import org.apache.pulsar.client.api.SubscriptionInitialPosition;
 
 /**
  * Configuration of Pulsar Function.
  */
-@Getter
-@Setter
 @Data
-@EqualsAndHashCode
-@ToString
 @Builder(toBuilder = true)
 @NoArgsConstructor
 @AllArgsConstructor
@@ -76,6 +67,7 @@ public class FunctionConfig {
     private Map<String, String> customSerdeInputs;
     private String topicsPattern;
     private Map<String, String> customSchemaInputs;
+    private Map<String, String> customSchemaOutputs;
 
     /**
      * A generalized way of specifying inputs.
@@ -83,6 +75,9 @@ public class FunctionConfig {
     private Map<String, ConsumerConfig> inputSpecs;
 
     private String output;
+
+    // Any configuration that need to be applied for producers
+    private ProducerConfig producerConfig;
 
     /**
      * Represents either a builtin schema type (eg: 'avro', 'json', ect) or the class name for a Schema
@@ -93,8 +88,16 @@ public class FunctionConfig {
     private String outputSerdeClassName;
     private String logTopic;
     private ProcessingGuarantees processingGuarantees;
+    // Do we want function instances to process data in the same order as in the input topics
+    // This essentially means that every partition of input topic is consumed by only one instance
     private Boolean retainOrdering;
+    // Do we want the same function instance to process all data keyed by the input topic's message key
+    private Boolean retainKeyOrdering;
+    // batchBuilder provides two types of batch construction methods, DEFAULT and KEY_BASED
+    private String batchBuilder;
+    private Boolean forwardSourceMessageProperty;
     private Map<String, Object> userConfig;
+    private Map<String, ExternalPulsarConfig> externalPulsars;
     // This is a map of secretName(aka how the secret is going to be
     // accessed in the function via context) to an object that
     // encapsulates how the secret is fetched by the underlying
@@ -120,4 +123,11 @@ public class FunctionConfig {
     // to change behavior at runtime. Currently, this primarily used by the KubernetesManifestCustomizer
     // interface
     private String customRuntimeOptions;
+    // Max pending async requests per instance to avoid large number of concurrent requests.
+    // Only used in AsyncFunction. Default: 1000.
+    private Integer maxPendingAsyncRequests;
+    // Whether the pulsar admin client exposed to function context, default is disabled.
+    private Boolean exposePulsarAdminClientEnabled;
+
+    private SubscriptionInitialPosition subscriptionPosition;
 }
