@@ -25,6 +25,7 @@ import io.confluent.kafka.schemaregistry.client.SchemaRegistryClient;
 import io.confluent.kafka.schemaregistry.client.rest.exceptions.RestClientException;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.pulsar.client.api.Schema;
+import org.apache.pulsar.client.impl.schema.SchemaInfoImpl;
 import org.apache.pulsar.common.schema.SchemaInfo;
 import org.apache.pulsar.common.schema.SchemaType;
 
@@ -65,45 +66,17 @@ final class AvroSchemaCache {
             org.apache.avro.Schema schema = schemaRegistryClient.getById(schemaId);
             String definition = schema.toString(false);
             log.info("Schema {} definition {}", schemaId, definition);
-            SchemaInfo schemaInfo = SchemaInfo.builder()
+            SchemaInfo schemaInfo = SchemaInfoImpl.builder()
                     .type(SchemaType.AVRO)
                     .name(schema.getName())
                     .properties(Collections.emptyMap())
                     .schema(definition.getBytes(StandardCharsets.UTF_8)
                     ).build();
-            return new Schema<ByteBuffer>() {
-                @Override
-                public byte[] encode(ByteBuffer message) {
-                    return getBytes(message);
-                }
-
-                @Override
-                public SchemaInfo getSchemaInfo() {
-                    return schemaInfo;
-                }
-
-                @Override
-                public Schema<ByteBuffer> clone() {
-                    return this;
-                }
-
-                @Override
-                public ByteBuffer decode(byte[] bytes, byte[] schemaVersion) {
-                    throw new UnsupportedOperationException();
-                }
-            };
+            return new ByteBufferSchemaWrapper(schemaInfo);
         } catch (IOException | RestClientException e) {
             throw new RuntimeException(e);
         }
     }
 
-
-    private static byte[] getBytes(ByteBuffer buffer) {
-        buffer.mark();
-        byte[] avroEncodedData = new byte[buffer.remaining()];
-        buffer.get(avroEncodedData);
-        buffer.reset();
-        return avroEncodedData;
-    }
 
 }
